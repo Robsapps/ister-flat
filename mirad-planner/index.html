@@ -1174,7 +1174,7 @@ function bathTapModel(g0,bt,o){ let g=g0; // o: x,y (rim height),z (wall side), 
 // ---------- official manufacturer models (Laufen, Geberit): loaded on demand on the public page, the generic look until then ----------
 const OFFICIAL={}, OFF_STATE={}, OFF_KEYS=new Set(["tub","vanity","wc","cabinet","mirror"]);
 const MODELS_REACHABLE=!!window.__forceModels||(!(window.claude&&window.claude.use)&&location.protocol!=="file:");
-const mfOf=p=>p&&(p.mf||MF_BY_URL[p.url])||null;
+const mfOf=p=>p&&p.id&&p.id.startsWith("cat-")&&p.mf||null; // the original hand-picked products always keep their own look
 let offLoader=null, offTimer=0;
 function dequant(geo){ // KHR_mesh_quantization stores positions as normalised integers; three r128 reads them raw, so turn them into floats
   Object.keys(geo.attributes).forEach(k=>{ const a=geo.attributes[k]; if(!a.normalized&&!a.isInterleavedBufferAttribute) return;
