@@ -530,7 +530,7 @@ $("loading").remove();
 
 // ---------- three.js scene ----------
 const viewer=$("viewer");
-const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
+const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true,alpha:true});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
 renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap; renderer.shadowMap.autoUpdate=false;
 // draw only when something changes (camera, room, a drag): keeps laptops cool and the page quick
@@ -1421,7 +1421,7 @@ renderer.domElement.addEventListener("pointermove",e=>{ if(!drag)return; yawPitc
 const ray=new THREE.Raycaster(), ndc=new THREE.Vector2(), tmpV=new THREE.Vector3();
 renderer.domElement.style.touchAction="none"; renderer.domElement.addEventListener("contextmenu",e=>e.preventDefault());
 let hold=null, carry=null, doorRaf=0;
-function aimRay(e){ const r=renderer.domElement.getBoundingClientRect(); ndc.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1); ray.setFromCamera(ndc,camera); }
+function aimRay(e){ if(e.xrRay){ ray.ray.copy(e.xrRay); return; } const r=renderer.domElement.getBoundingClientRect(); ndc.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1); ray.setFromCamera(ndc,camera); }
 function pickTarget(e){
   aimRay(e);
   const hits=ray.intersectObjects([...fixtures.filter(f=>f.visible),...doorParts,...winParts],true);
@@ -1535,6 +1535,7 @@ function fadeWalls(){
 
 const clock=new THREE.Clock();
 function tick(){
+  if(renderer.xr.isPresenting){ requestAnimationFrame(tick); return; } // AR / VR draws its own frames (see xr.src.js)
   const dt=Math.min(clock.getDelta(),0.05);
   if(view==="walk"){
     const sp=1.3*dt, fx=Math.sin(yawPitch.yaw), fz=Math.cos(yawPitch.yaw);
@@ -1870,6 +1871,303 @@ document.querySelectorAll("[data-win]").forEach(b=>b.addEventListener("click",()
 $("winWall").addEventListener("change",syncWin);
 document.querySelectorAll("[data-preset]").forEach(b=>b.addEventListener("click",()=>{ MANUAL={}; applyPreset(PRESETS[b.dataset.preset]); rebuild(); }));
 $("resetLayout").addEventListener("click",()=>{ MANUAL={}; rebuild(); });
+
+// ---------- AR and VR ----------
+// VR (Meta Quest and other headsets): stand inside the designed bathroom at true size, walk with the left stick, turn with the right.
+// AR (Quest passthrough, Android phones): tap two corners of a real wall and the bathroom is laid over the real room at true size.
+// iPhone and iPad have no WebXR, so there the products are handed to Apple's AR Quick Look as a USDZ file.
+// The scene never moves. A "rig" holds the camera and maps real-room coordinates into scene coordinates, so lights and shadows stay right.
+// build.py pastes this file into the page in place of the /*XR*/ marker, inside the planner's own script.
+const XR=(()=>{
+  const ua=navigator.userAgent, isHeadset=/OculusBrowser|Quest|Pico|Wolvic/i.test(ua), isPhone=/Android|iPhone|iPad|iPod/i.test(ua)&&!isHeadset;
+  const iosAR=(()=>{ try{ return document.createElement("a").relList.supports("ar"); }catch(e){ return false; } })();
+  const WALL_ORDER=["north","east","south","west"], TILE_NAMES=["Products only","With floor tiles","With all tiles"];
+  const css=document.createElement("style"); css.textContent=`
+.xrbar{position:absolute;top:58px;left:12px;display:flex;gap:6px;flex-wrap:wrap;max-width:calc(100% - 24px)}
+.xrbar button,.xrbar a{font:inherit;font-weight:600;font-size:13px;border:1px solid var(--line);background:var(--overlay);color:var(--fg);padding:8px 12px;border-radius:8px;cursor:pointer;backdrop-filter:blur(6px);text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+.xrbar .go{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.xrtip{position:absolute;top:100px;left:12px;max-width:min(340px,calc(100% - 24px));background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:13px;box-shadow:0 8px 28px rgba(0,0,0,.18);z-index:5}
+.xrtip b{display:block;margin-top:8px}.xrtip b:first-child{margin-top:0}.xrtip p{margin:2px 0 0;color:var(--muted)}
+#xrUI{position:fixed;inset:0;display:none;flex-direction:column;justify-content:space-between;align-items:center;padding:max(14px,env(safe-area-inset-top)) 12px max(18px,env(safe-area-inset-bottom));touch-action:none;z-index:50;font-family:var(--font-body)}
+#xrUI.on{display:flex}
+#xrMsg{background:rgba(12,22,26,.78);color:#fff;font-size:15px;font-weight:500;line-height:1.35;padding:10px 14px;border-radius:12px;max-width:520px;text-align:center}
+#xrBtns{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+#xrBtns button{font:inherit;font-size:14px;font-weight:600;color:#fff;background:rgba(12,22,26,.78);border:1px solid rgba(255,255,255,.35);border-radius:999px;padding:12px 16px;min-height:44px}
+#xrBtns button.x{background:#fff;color:#10222a}`;
+  document.head.appendChild(css);
+
+  const bar=document.createElement("div"); bar.className="xrbar"; viewer.appendChild(bar);
+  const ui=document.createElement("div"); ui.id="xrUI";
+  ui.innerHTML=`<div id="xrMsg" aria-live="polite"></div><div id="xrBtns"><button type="button" data-x="wall">Next wall</button><button type="button" data-x="flip">Other side</button><button type="button" data-x="tiles">Tiles</button><button type="button" data-x="again">Start again</button><button type="button" class="x" data-x="exit">Exit</button></div>`;
+  document.body.appendChild(ui);
+  const msgEl=ui.querySelector("#xrMsg"), btnsEl=ui.querySelector("#xrBtns");
+  btnsEl.addEventListener("beforexrselect",e=>e.preventDefault()); // a tap on a button must not also count as a tap on the floor
+
+  // ----- things that live in real-room coordinates (children of the rig) -----
+  const rig=new THREE.Group(); rig.name="xr-rig";
+  const accent=0x19b5cf;
+  const reticle=new THREE.Mesh(new THREE.RingGeometry(0.055,0.075,40).rotateX(-Math.PI/2),new THREE.MeshBasicMaterial({color:accent,depthTest:false,transparent:true})); reticle.renderOrder=20;
+  const dot=new THREE.Mesh(new THREE.CircleGeometry(0.012,16).rotateX(-Math.PI/2),reticle.material); reticle.add(dot);
+  const pin=new THREE.Mesh(new THREE.CylinderGeometry(0.012,0.012,0.5,12).translate(0,0.25,0),new THREE.MeshBasicMaterial({color:accent}));
+  const span=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]),new THREE.LineBasicMaterial({color:accent,depthTest:false,transparent:true})); span.renderOrder=20; span.frustumCulled=false;
+  const rays=[0,1].map(()=>{ const l=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,-1)]),new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.7})); l.frustumCulled=false; l.visible=false;
+    const grip=new THREE.Mesh(new THREE.BoxGeometry(0.03,0.03,0.1).translate(0,0,0.04),new THREE.MeshBasicMaterial({color:0x2a3338})); l.add(grip); return l; });
+  const pc=document.createElement("canvas"); pc.width=1024; pc.height=512; const ptex=new THREE.CanvasTexture(pc); ptex.encoding=THREE.sRGBEncoding;
+  const panel=new THREE.Mesh(new THREE.PlaneGeometry(0.7,0.35),new THREE.MeshBasicMaterial({map:ptex,transparent:true,depthTest:false,toneMapped:false})); panel.renderOrder=30;
+  const catcher=new THREE.Mesh(new THREE.PlaneGeometry(1,1).rotateX(-Math.PI/2),new THREE.ShadowMaterial({opacity:0.28})); catcher.receiveShadow=true; catcher.position.y=0.002; // soft shadows on the real floor
+  [reticle,pin,span,panel,...rays].forEach(o=>{ o.visible=false; rig.add(o); });
+
+  let S=null; // the running session's state
+  const v1=new THREE.Vector3(), v2=new THREE.Vector3(), q1=new THREE.Quaternion(), UP=new THREE.Vector3(0,1,0);
+  const angle=(x,z)=>Math.atan2(-z,x); // heading of a floor direction; turning the rig by t adds t to it
+
+  function say(lines,hold){ if(!S) return; const arr=[].concat(lines);
+    msgEl.textContent=arr.join(" ");
+    if(S.handheld) return;
+    const x=pc.getContext("2d"); x.clearRect(0,0,1024,512); x.fillStyle="rgba(12,22,26,.86)";
+    const r=36; x.beginPath(); x.moveTo(r,0); x.arcTo(1024,0,1024,512,r); x.arcTo(1024,512,0,512,r); x.arcTo(0,512,0,0,r); x.arcTo(0,0,1024,0,r); x.fill();
+    x.fillStyle="#fff"; x.textAlign="center"; x.textBaseline="middle";
+    const n=arr.length, lh=Math.min(92,440/n); arr.forEach((t,i)=>{ x.font=`${i?500:600} ${i?Math.min(46,lh*0.6):Math.min(58,lh*0.72)}px system-ui, sans-serif`; x.fillStyle=i?"#cfe6ec":"#fff"; x.fillText(t,512,256+(i-(n-1)/2)*lh,960); });
+    ptex.needsUpdate=true; S.panelPlace=true; S.panelUntil=hold===0?Infinity:performance.now()+(hold||9000); }
+
+  function roomParts(){ const walls=Object.values(wallGroups), other=[]; let floor=null;
+    room.children.forEach(o=>{ if(walls.includes(o)||fixtures.includes(o)||o===ceiling||labels.includes(o)) return;
+      if(!floor&&o.isMesh&&o.geometry.type==="PlaneGeometry"&&Math.abs(o.position.y)<1e-3) floor=o; else other.push(o); });
+    return {walls,floor,other}; }
+  function applyVis(){ if(!S||!room) return; S.room=room; labels.forEach(l=>l.visible=false);
+    if(S.mode==="ar"){ const p=roomParts();
+      room.visible=S.placed; ceiling.visible=false; room.traverse(o=>{ if(o.userData.walkOnly) o.visible=false; }); p.other.forEach(o=>o.visible=false);
+      if(p.floor) p.floor.visible=S.tiles>=1; p.walls.forEach(g=>{ g.visible=S.tiles>=2; g.children.forEach(m=>{ if(m.material&&m.material.map){ m.material.opacity=1; m.material.depthWrite=true; } m.castShadow=S.tiles>=2; }); });
+      fixtures.forEach(f=>f.visible=true);
+      catcher.scale.set(dims.L+1,1,dims.W+1); catcher.visible=S.placed&&S.tiles===0; }
+    else { fadeWalls(); catcher.visible=false; }
+    if(carry){ scene.remove(carry.box); carry=null; } S.grab=-1;
+    room.updateMatrixWorld(true); S.boxes=fixtures.map(f=>({f,box:new THREE.Box3().setFromObject(f)})); S.hover=[null,null]; glow.visible=false; // boxes for pointing at items with a controller
+    renderer.shadowMap.needsUpdate=true; }
+
+  // ----- headset: point at an item, hold the trigger to move it, A / B to try other models -----
+  const glow=new THREE.Box3Helper(new THREE.Box3(),0x19b5cf); glow.visible=false; glow.material.depthTest=false; glow.material.transparent=true; glow.renderOrder=15;
+  const aimDot=new THREE.Mesh(new THREE.SphereGeometry(0.012,12,8),new THREE.MeshBasicMaterial({color:0xffffff,depthTest:false,transparent:true})); aimDot.renderOrder=21; aimDot.visible=false;
+  const xrRay=new THREE.Ray(), hitP=new THREE.Vector3();
+  function pointAt(i){ // nearest item whose box the controller's ray enters
+    xrRay.origin.copy(rays[i].position).applyMatrix4(rig.matrixWorld); xrRay.direction.set(0,0,-1).applyQuaternion(rays[i].quaternion).transformDirection(rig.matrixWorld);
+    let best=null, bd=6; for(const b of S.boxes){ if(!b.f.visible||b.box.containsPoint(xrRay.origin)) continue; if(xrRay.intersectBox(b.box,hitP)){ const d=hitP.distanceTo(xrRay.origin); if(d<bd){ bd=d; best={f:b.f,box:b.box,point:hitP.clone()}; } } }
+    return best; }
+  function grab(i){ const h=S.hover[i]; if(!h||carry||S.grab>=0) return false; const s=lastState, p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p) return false;
+    const info={uid:p.uid||p.key,key:p.key,wall:p.wall,s:p.s,out:p.out||0,w:p.w,d:p.d,free:isFree(p.key,p.prod),orig:{wall:p.wall,s:p.s,out:p.out||0}};
+    const y=clamp(h.point.y,0.02,2.3), u=wallUnder({xrRay},y);
+    carry={...info,obj:h.f,y,off:u&&u.wall===info.wall?clamp(u.along-info.s,0,info.w):info.w/2,moved:true};
+    if(carry.free&&u){ const a=alongOn(carry.wall,u); carry.off=clamp(a.along-info.s,0,info.w); carry.offD=clamp(a.dist-info.out,0,info.d); }
+    carry.box=new THREE.BoxHelper(h.f,0x19b5cf); scene.add(carry.box); S.grab=i; glow.visible=false; pulse(i,0.5,40);
+    say(["Moving it","Slide it along the walls","Let go of the trigger to put it down"],3500); return true; }
+  function letGo(i){ if(S.grab!==i||!carry) return; S.grab=-1; dropCarry(); pulse(i,0.4,30); }
+  function otherModel(i,dir){ const h=S.hover[i]; if(!h||carry) return false; const p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p||!p.prod) return false;
+    const sel=$("prod-"+p.key), list=(sel&&sel.tagName==="SELECT")?[...sel.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key);
+    if(list.length<2){ say(["Only one model of this kind","in the catalogue so far"],3000); return true; }
+    const n=list.length, at=Math.max(0,list.findIndex(x=>x.id===p.prod.id)), pr=list[((at+dir)%n+n)%n], it=ITEMS.find(x=>x.key===p.key), uid=p.uid||p.key;
+    if(it&&it.multi){ const old=document.querySelector(`input[data-cat="${p.key}"][value="${p.prod.id}"]`), nu=document.querySelector(`input[data-cat="${p.key}"][value="${pr.id}"]`);
+      if(!nu) return true; if(old) old.checked=false; nu.checked=true;
+      if(MANUAL[uid]){ const nuid=uid.replace(p.prod.id,pr.id); if(nuid!==uid){ MANUAL[nuid]=MANUAL[uid]; delete MANUAL[uid]; } } }
+    else if(sel) sel.value=pr.id; else return true;
+    rebuild(); pulse(i,0.3,25);
+    say([pr.name,`${list.indexOf(pr)+1} of ${n} · ${eur(priceOf(pr))}`,"A / X: next model · B / Y: previous"],6000); return true; }
+  function pulse(i,v,ms){ try{ for(const src of S.session.inputSources){ if((src.handedness==="left"?0:1)===i&&src.gamepad&&src.gamepad.hapticActuators&&src.gamepad.hapticActuators[0]) src.gamepad.hapticActuators[0].pulse(v,ms); } }catch(e){} }
+
+  function bestWall(len){ const d=wallDefs(dims.L,dims.W); return WALL_ORDER.reduce((a,k)=>Math.abs(d[k].len-len)<Math.abs(d[a].len-len)-0.005?k:a,"north"); }
+  function alignRig(){ // lay the chosen design wall onto the two tapped corners: its left end (seen from inside) on the first tap
+    const a=S.flip?S.p2:S.p1, b=S.flip?S.p1:S.p2, w=wallDefs(dims.L,dims.W)[S.wall];
+    const t=angle(w.d[0],w.d[1])-angle(b.x-a.x,b.z-a.z);
+    rig.rotation.set(0,t,0); v1.copy(a).applyAxisAngle(UP,t);
+    rig.position.set(w.o[0]-dims.L/2-v1.x,-a.y,w.o[1]-dims.W/2-v1.z); rig.updateMatrixWorld(true); }
+  function turnRig(t,cx,cz){ // turn about a point given in scene coordinates
+    v1.set(rig.position.x-cx,0,rig.position.z-cz).applyAxisAngle(UP,t); rig.position.x=cx+v1.x; rig.position.z=cz+v1.z; rig.rotation.y+=t; }
+  function slideRoom(rx,rz){ // make the bathroom appear moved by (rx,rz) metres in the real room
+    v1.set(rx,0,rz).applyAxisAngle(UP,rig.rotation.y); rig.position.x-=v1.x; rig.position.z-=v1.z; }
+  function placedHelp(){ const cm=Math.round(S.p1.distanceTo(S.p2)*100), w=wallDefs(dims.L,dims.W)[S.wall], wcm=Math.round(w.len*100), off=Math.abs(cm-wcm)>8?` You measured ${cm} cm; this wall is ${wcm} cm in the plan.`:"";
+    if(S.handheld) say(`Placed at true size.${off} Drag to slide it, twist with two fingers to turn it. "Next wall" if it sits the wrong way round.`);
+    else say(["Placed at true size",off.trim()||"Walk around and look","Left stick slides it · right stick turns it","Grip: next wall · other grip: other side","A / X: tiles · B / Y: start again","Point at an item: trigger moves it, A / B swaps it"].filter(Boolean),14000); }
+  function startPlacing(){ S.placed=false; S.p1=S.p2=null; pin.visible=span.visible=false; rig.position.set(0,0,0); rig.rotation.set(0,0,0); rig.updateMatrixWorld(true);
+    btnsEl.querySelectorAll("[data-x=wall],[data-x=flip],[data-x=tiles],[data-x=again]").forEach(b=>b.hidden=true);
+    applyVis();
+    if(S.handheld) say("Move the phone slowly until a ring appears on the floor. Aim the ring at a corner of the room and tap.");
+    else say(["Point at the floor in a corner of the room","and press the trigger"],0); }
+  function tapFloor(){ if(!S||S.mode!=="ar"||S.placed||!S.hit) return;
+    if(!S.p1){ S.p1=S.hit.clone(); pin.position.copy(S.p1); pin.visible=true;
+      if(S.handheld) say("Now aim at the next corner to the right along the same wall, and tap."); else say(["Now point at the next corner","to the right, along the same wall","and press the trigger"],0); return; }
+    if(S.hit.distanceTo(S.p1)<0.3){ say(S.handheld?"That is too close to the first corner. Aim at the next corner of the wall and tap.":["Too close to the first corner","Point at the next corner of the wall"],0); return; }
+    S.p2=S.hit.clone(); S.p2.y=S.p1.y; S.wall=bestWall(S.p1.distanceTo(S.p2)); S.flip=false; S.placed=true; pin.visible=span.visible=reticle.visible=false;
+    alignRig(); btnsEl.querySelectorAll("button").forEach(b=>b.hidden=false); applyVis(); placedHelp(); }
+  const act={
+    wall(){ if(!S.placed) return; S.wall=WALL_ORDER[(WALL_ORDER.indexOf(S.wall)+1)%4]; alignRig(); say(S.handheld?`Using the ${Math.round(wallDefs(dims.L,dims.W)[S.wall].len*100)} cm wall: ${WALLS[S.wall]}.`:["Next wall",WALLS[S.wall]],4000); },
+    flip(){ if(!S.placed) return; S.flip=!S.flip; alignRig(); say(S.handheld?"Moved to the other side of the wall line.":["Other side of the wall"],4000); },
+    tiles(){ if(!S.placed) return; S.tiles=(S.tiles+1)%3; applyVis(); say(S.handheld?TILE_NAMES[S.tiles]+".":[TILE_NAMES[S.tiles]],4000); },
+    again(){ startPlacing(); },
+    exit(){ if(S&&S.session) S.session.end(); }
+  };
+  btnsEl.addEventListener("click",e=>{ const b=e.target.closest("button"); if(b&&S&&act[b.dataset.x]) act[b.dataset.x](); });
+
+  // phone: drag to slide, two-finger twist to turn
+  const touches=new Map(); let twist=null;
+  ui.addEventListener("pointerdown",e=>{ if(e.target.closest("button")) return; touches.set(e.pointerId,{x:e.clientX,y:e.clientY}); twist=null; });
+  ui.addEventListener("pointermove",e=>{ const t=touches.get(e.pointerId); if(!t||!S||!S.placed||!S.head) return; const dx=e.clientX-t.x, dy=e.clientY-t.y; t.x=e.clientX; t.y=e.clientY;
+    if(touches.size===1){ const k=1.6/Math.max(320,window.innerWidth), m=S.headM.elements;
+      v1.set(m[0],0,m[2]).normalize(); v2.set(m[4]-m[8],0,m[6]-m[10]).normalize(); // screen right and screen up, flattened onto the floor
+      slideRoom(v1.x*dx*k-v2.x*dy*k, v1.z*dx*k-v2.z*dy*k); }
+    else if(touches.size===2){ const [a,b]=[...touches.values()], ang=Math.atan2(b.y-a.y,b.x-a.x);
+      if(twist!==null){ let d=ang-twist; if(d>Math.PI) d-=2*Math.PI; if(d<-Math.PI) d+=2*Math.PI; S.headW.setFromMatrixPosition(camera.matrixWorld); turnRig(d,0,0); }
+      twist=ang; } });
+  ["pointerup","pointercancel"].forEach(t=>ui.addEventListener(t,e=>{ touches.delete(e.pointerId); twist=null; }));
+
+  function sticks(src,st,dt){ const gp=src.gamepad; if(!gp) return; const ax=gp.axes, x=ax.length>=4?ax[2]:ax[0]||0, y=ax.length>=4?ax[3]:ax[1]||0, left=src.handedness==="left";
+    const dz=v=>Math.abs(v)<0.18?0:v, sx=dz(x), sy=dz(y), m=S.headM.elements;
+    v1.set(m[0],0,m[2]).normalize(); v2.set(-m[8],0,-m[10]).normalize(); // head right and head forward on the floor, in real-room coordinates
+    if(S.mode==="vr"){
+      if(left&&(sx||sy)){ const sp=1.4*dt; // walk: move the rig, keep the head inside the room
+        const mx=(v1.x*sx-v2.x*sy)*sp, mz=(v1.z*sx-v2.z*sy)*sp; v1.set(mx,0,mz).applyAxisAngle(UP,rig.rotation.y);
+        const h=S.headW, k=0.2, nx=clamp(h.x+v1.x,-dims.L/2+k,dims.L/2-k), nz=clamp(h.z+v1.z,-dims.W/2+k,dims.W/2-k); rig.position.x+=nx-h.x; rig.position.z+=nz-h.z; h.x=nx; h.z=nz; }
+      if(!left){ if(Math.abs(x)>0.6&&!st.snapped){ st.snapped=true; turnRig(x>0?-Math.PI/6:Math.PI/6,S.headW.x,S.headW.z); } else if(Math.abs(x)<0.3) st.snapped=false; }
+    } else if(S.placed){
+      if(left&&(sx||sy)){ const sp=0.5*dt; slideRoom((v1.x*sx-v2.x*sy)*sp,(v1.z*sx-v2.z*sy)*sp); }
+      if(!left&&sx) turnRig(sx*0.6*dt,0,0);
+    }
+    const b=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed), edge=(i,name)=>{ const p=b(i), was=st[name]; st[name]=p; return p&&!was; };
+    const a=edge(4,"a"), bb=edge(5,"b");
+    const i=left?0:1, rpt=(name,on)=>{ if(!on){ st[name+"T"]=0; return false; } const t=performance.now(); if(!st[name+"T"]){ st[name+"T"]=t+550; return true; } if(t>st[name+"T"]){ st[name+"T"]=t+280; return true; } return false; }; // hold the button to keep stepping
+    if(S.hover[i]&&!carry&&S.placed){ if(rpt("a",b(4))) otherModel(i,1); if(rpt("b",b(5))) otherModel(i,-1); return; }
+    if(S.mode==="ar"){ if(a) act.tiles(); if(bb) act.again(); }
+    else if(a||bb){ S.needStart=true; say(["Back at the door"],2500); } }
+
+  function frame(time,xf){ if(!S||!xf) return;
+    const dt=Math.min(0.05,(time-(S.t||time))/1000); S.t=time;
+    const ref=renderer.xr.getReferenceSpace(), pose=ref&&xf.getViewerPose(ref);
+    if(room!==S.room) applyVis(); // the planner rebuilt the room (a model finished loading)
+    if(pose){ const p=pose.transform.position, o=pose.transform.orientation;
+      S.head=true; S.headM.compose(v1.set(p.x,p.y,p.z),q1.set(o.x,o.y,o.z,o.w),v2.set(1,1,1)); S.headL.set(p.x,p.y,p.z);
+      if(S.needStart){ S.needStart=false; // VR: stand just inside the door, looking into the room
+        const t=angle(Math.sin(yawPitch.yaw),Math.cos(yawPitch.yaw))-angle(-S.headM.elements[8],-S.headM.elements[10]); rig.rotation.set(0,t,0);
+        v1.copy(S.headL).applyAxisAngle(UP,t); rig.position.set(walkPos.x-v1.x,0,walkPos.z-v1.z); }
+      rig.updateMatrixWorld(true); S.headW.copy(S.headL).applyMatrix4(rig.matrixWorld);
+      // controllers
+      let aim=null; const seen=[false,false];
+      for(const src of xf.session.inputSources){ if(src.targetRayMode!=="tracked-pointer") continue;
+        const i=src.handedness==="left"?0:1, st=S.pads[i], rp=xf.getPose(src.targetRaySpace,ref);
+        if(rp){ seen[i]=true; rays[i].matrix.fromArray(rp.transform.matrix); rays[i].matrix.decompose(rays[i].position,rays[i].quaternion,rays[i].scale);
+          if(!aim||src===S.lastSrc||(i===1&&aim.src!==S.lastSrc)) aim={src,o:rays[i].position.clone(),d:new THREE.Vector3(0,0,-1).applyQuaternion(rays[i].quaternion)}; }
+        sticks(src,st,dt); }
+      rays.forEach((r,i)=>r.visible=seen[i]&&!S.handheld);
+      // pointing at items, and carrying one
+      if(S.placed&&!S.handheld&&S.boxes){ let shown=null;
+        for(let i=1;i>=0;i--){ S.hover[i]=seen[i]&&!carry?pointAt(i):null; if(S.hover[i]&&(!shown||S.lastHand===i)) shown=S.hover[i]; }
+        if(carry&&S.grab>=0){ if(seen[S.grab]){ pointAt(S.grab); moveCarry({xrRay}); } shown=null; }
+        glow.visible=!!shown; aimDot.visible=!!shown; if(shown){ glow.box.copy(shown.box); aimDot.position.copy(shown.point); }
+      } else { glow.visible=aimDot.visible=false; }
+      // where the floor is being pointed at
+      if(S.mode==="ar"&&!S.placed){ S.hit=null;
+        if(S.hitSrc){ const hr=xf.getHitTestResults(S.hitSrc); if(hr.length){ const hp=hr[0].getPose(ref); if(hp){ const q=hp.transform.position; S.hit=new THREE.Vector3(q.x,q.y,q.z); } } }
+        else if(aim&&aim.d.y<-0.05){ const k=-aim.o.y/aim.d.y; if(k>0&&k<8) S.hit=aim.o.clone().addScaledVector(aim.d,k); }
+        else if(S.handheld&&!S.wantHit){ const d=new THREE.Vector3(-S.headM.elements[8],-S.headM.elements[9],-S.headM.elements[10]); if(d.y<-0.05){ const k=-S.headL.y/d.y; if(k<8) S.hit=S.headL.clone().addScaledVector(d,k); } } // no hit-test on this phone: use the estimated floor
+        reticle.visible=!!S.hit; if(S.hit){ reticle.position.copy(S.hit); if(S.p1){ S.hit.y=S.p1.y; const g=span.geometry.attributes.position; g.setXYZ(0,S.p1.x,S.p1.y+0.01,S.p1.z); g.setXYZ(1,S.hit.x,S.hit.y+0.01,S.hit.z); g.needsUpdate=true; span.visible=true;
+            if(S.handheld){ const cm=Math.round(S.hit.distanceTo(S.p1)*100); if(cm!==S.cm){ S.cm=cm; msgEl.textContent=`Now aim at the next corner to the right along the same wall, and tap. ${cm} cm so far.`; } } } }
+      }
+      // the floating note in the headset: placed once in front of you, never glued to your face
+      if(!S.handheld){ if(S.panelPlace){ S.panelPlace=false; const m=S.headM.elements; v1.set(-m[8],0,-m[10]).normalize(); panel.position.set(S.headL.x+v1.x*0.95,Math.max(0.6,S.headL.y-0.12),S.headL.z+v1.z*0.95); panel.rotation.set(0,Math.atan2(-v1.x,-v1.z),0); }
+        panel.visible=performance.now()<S.panelUntil; }
+    }
+    rig.updateMatrixWorld(true);
+    renderer.render(scene,camera);
+  }
+
+  async function begin(mode,session){
+    const prev={view,bg:scene.background,winShadow:winLight.castShadow};
+    S={mode,session,prev,handheld:!!session.domOverlayState||(isPhone&&mode==="ar"),placed:mode==="vr",tiles:0,pads:[{},{}],head:false,headM:new THREE.Matrix4(),headL:new THREE.Vector3(),headW:new THREE.Vector3(),needStart:mode==="vr",panelUntil:0,room:null,boxes:null,hover:[null,null],grab:-1,lastHand:1,hit:null,hitSrc:null,wantHit:false,lastSrc:null};
+    if(swapper) closeSwapper();
+    setView("walk"); orbit.enabled=false; $("pad").hidden=true;
+    rig.position.set(0,0,0); rig.rotation.set(0,0,0); scene.add(rig); scene.add(catcher); scene.add(glow); scene.add(aimDot); rig.add(camera);
+    if(mode==="ar"){ scene.background=null; renderer.setClearColor(0x000000,0); }
+    if(isHeadset) winLight.castShadow=false; // one shadow light is plenty for a headset's chip
+    renderer.xr.enabled=true; renderer.xr.setReferenceSpaceType("local-floor");
+    session.addEventListener("end",finish);
+    session.addEventListener("select",e=>{ if(!S) return; S.lastSrc=e.inputSource; tapFloor(); });
+    session.addEventListener("selectstart",e=>{ if(!S||!S.placed||S.handheld) return; const i=e.inputSource.handedness==="left"?0:1; S.lastHand=i; grab(i); });
+    session.addEventListener("selectend",e=>{ if(!S) return; letGo(e.inputSource.handedness==="left"?0:1); });
+    session.addEventListener("squeeze",e=>{ if(!S||S.mode!=="ar") return; (e.inputSource.handedness==="left"?act.flip:act.wall)(); });
+    try{ await renderer.xr.setSession(session); }catch(e){ try{ session.end(); }catch(_){ } finish(); note("AR / VR could not start on this device."); return; }
+    try{ const layer=session.renderState.baseLayer; if(layer&&"fixedFoveation" in layer) layer.fixedFoveation=1; }catch(e){}
+    if(mode==="ar"&&session.requestHitTestSource&&S.handheld){ S.wantHit=true;
+      session.requestReferenceSpace("viewer").then(vs=>session.requestHitTestSource({space:vs})).then(h=>{ if(S) S.hitSrc=h; }).catch(()=>{ if(S) S.wantHit=false; }); }
+    if(S.handheld) ui.classList.add("on");
+    if(mode==="ar") startPlacing(); else { applyVis(); say(["You are standing in the bathroom","Left stick: walk · right stick: turn","Point at an item and hold the trigger to move it","Point at an item and press A or B for other models","Meta button: leave"],16000); }
+    renderer.setAnimationLoop(frame);
+  }
+  function finish(){ if(!S) return; const prev=S.prev; S=null;
+    renderer.setAnimationLoop(null); renderer.xr.enabled=false;
+    ui.classList.remove("on"); touches.clear();
+    [reticle,pin,span,panel,...rays].forEach(o=>o.visible=false); catcher.visible=false; glow.visible=aimDot.visible=false; scene.remove(glow); scene.remove(aimDot);
+    if(carry){ scene.remove(carry.box); carry=null; }
+    scene.remove(catcher); rig.remove(camera); scene.remove(rig); camera.position.set(0,1.6,0); camera.quaternion.set(0,0,0,1); camera.scale.set(1,1,1); camera.updateMatrixWorld(true);
+    scene.background=prev.bg; setSceneBg(); winLight.castShadow=prev.winShadow;
+    build(readState()); setView(prev.view); resize(); invalidate(); }
+
+  function start(mode){ if(S||!navigator.xr) return;
+    const init=mode==="vr"?{requiredFeatures:["local-floor"]}:{requiredFeatures:["local-floor"],optionalFeatures:["hit-test","dom-overlay"],domOverlay:{root:ui}};
+    navigator.xr.requestSession(mode==="vr"?"immersive-vr":"immersive-ar",init).then(s=>begin(mode,s)).catch(e=>note(e&&e.name==="NotAllowedError"?"Permission was not given. Tap the button again and allow it.":"This could not start here: "+(e&&e.message||e)));
+  }
+
+  // ----- iPhone / iPad: Apple's AR Quick Look -----
+  const addJs=src=>new Promise((res,rej)=>{ const s=document.createElement("script"); s.src=src; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+  async function makeUsdz(){ // the chosen products at true size, without the walls, as one USDZ file
+    if(!window.fflate) await addJs("https://cdnjs.cloudflare.com/ajax/libs/fflate/0.8.2/fflate.min.js");
+    if(!THREE.USDZExporter) await addJs("https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/exporters/USDZExporter.js");
+    room.updateMatrixWorld(true); const out=new THREE.Scene(); let n=0;
+    const texCache=new Map(), small=t=>{ if(!t||!t.image) return t; if(texCache.has(t)) return texCache.get(t); // keep the file light for the phone
+      const im=t.image, w=im.width||im.videoWidth||0, h=im.height||0, k=Math.min(1,512/Math.max(w,h,1)); if(k===1){ texCache.set(t,t); return t; }
+      const c=document.createElement("canvas"); c.width=Math.max(1,Math.round(w*k)); c.height=Math.max(1,Math.round(h*k)); c.getContext("2d").drawImage(im,0,0,c.width,c.height);
+      const nt=t.clone(); nt.image=c; nt.needsUpdate=true; texCache.set(t,nt); return nt; };
+    fixtures.forEach(f=>f.traverse(o=>{ if(!o.isMesh||!o.visible||!o.geometry.attributes.position) return; let vis=true; o.traverseAncestors(a=>{ if(!a.visible) vis=false; }); if(!vis) return;
+      const mats=Array.isArray(o.material)?o.material:[o.material], m0=mats[0]; if(!m0||!m0.isMeshStandardMaterial) return;
+      const m=new THREE.MeshStandardMaterial({color:m0.color.clone(),roughness:m0.roughness,metalness:m0.metalness,opacity:m0.opacity,transparent:m0.transparent,map:small(m0.map)});
+      let g=new THREE.BufferGeometry(); const src=o.geometry; // plain decimal numbers only: shrunk models store whole numbers that the AR file format can't read
+      ["position","normal","uv"].forEach(k=>{ const at=src.attributes[k]; if(!at) return; const n=at.itemSize, f=new Float32Array(at.count*n), A=at.array, div=at.normalized?(A instanceof Int16Array?32767:A instanceof Uint16Array?65535:A instanceof Int8Array?127:A instanceof Uint8Array?255:1):1;
+        for(let i=0;i<at.count;i++){ f[i*n]=at.getX(i)/div; f[i*n+1]=at.getY(i)/div; if(n>2) f[i*n+2]=at.getZ(i)/div; } g.setAttribute(k,new THREE.BufferAttribute(f,n)); });
+      if(src.index) g.setIndex(Array.from(src.index.array));
+      g.applyMatrix4(o.matrixWorld); if(!g.attributes.normal) g.computeVertexNormals(); if(!g.attributes.uv) g.setAttribute("uv",new THREE.BufferAttribute(new Float32Array(g.attributes.position.count*2),2));
+      if(m0.side===THREE.DoubleSide){ // the AR viewer draws one face only, so thin shells get a second, inward-facing skin
+        const P=g.attributes.position, N=g.attributes.normal, U=g.attributes.uv, c=P.count, idx=g.index?Array.from(g.index.array):Array.from({length:c},(_,i)=>i), cat=(a,sgn)=>{ const f=new Float32Array(a.array.length*2); f.set(a.array); for(let i=0;i<a.array.length;i++) f[a.array.length+i]=a.array[i]*sgn; return new THREE.BufferAttribute(f,a.itemSize); };
+        const g2=new THREE.BufferGeometry(); g2.setAttribute("position",cat(P,1)); g2.setAttribute("normal",cat(N,-1)); g2.setAttribute("uv",cat(U,1));
+        const back=[]; for(let i=0;i+2<idx.length;i+=3) back.push(idx[i]+c,idx[i+2]+c,idx[i+1]+c); g2.setIndex(idx.concat(back)); g.dispose(); g=g2; }
+      out.add(new THREE.Mesh(g,m)); n++; }));
+    if(!n) throw new Error("nothing to show");
+    out.updateMatrixWorld(true);
+    const data=await new THREE.USDZExporter().parse(out);
+    out.traverse(o=>{ if(o.isMesh){ o.geometry.dispose(); o.material.dispose(); } }); texCache.forEach((v,k)=>{ if(v!==k) v.dispose(); });
+    return new Blob([data],{type:"model/vnd.usdz+zip"});
+  }
+
+  // ----- the buttons on the page -----
+  let tip=null;
+  function note(html,keep){ if(tip){ tip.remove(); tip=null; if(!html) return; } if(!html) return; tip=document.createElement("div"); tip.className="xrtip"; tip.setAttribute("role","status"); tip.innerHTML=html; viewer.appendChild(tip); if(!keep) setTimeout(()=>{ if(tip&&tip.innerHTML===html) note(""); },6000); }
+  const button=(label,fn,go)=>{ const b=document.createElement("button"); b.type="button"; b.textContent=label; if(go) b.className="go"; b.addEventListener("click",fn); bar.appendChild(b); return b; };
+  const HELP=`<b>VR headset (Meta Quest)</b><p>Open this page in the headset's browser and press "Walk in VR". You stand inside the bathroom at true size.</p><b>Android phone</b><p>Open this page in Chrome and press "See it in my room". Tap two corners of a wall and the bathroom appears over your real room.</p><b>iPhone or iPad</b><p>Open this page in Safari and press "See it in my room". The chosen products stand on your floor at true size.</p>`;
+  async function setup(){
+    const can=async m=>{ try{ return !!(navigator.xr&&await navigator.xr.isSessionSupported(m)); }catch(e){ return false; } };
+    const [vr,ar]=await Promise.all([can("immersive-vr"),can("immersive-ar")]); let any=false;
+    if(vr&&!isPhone){ button("Walk in VR",()=>start("vr"),true); any=true; }
+    if(ar){ button("See it in my room",()=>start("ar"),!vr||isPhone); any=true; }
+    else if(iosAR){ any=true; let link=null, sig="";
+      const b=button("See it in my room",async()=>{ b.disabled=true; b.textContent="Preparing…";
+        try{ const blob=await makeUsdz(); if(link){ URL.revokeObjectURL(link.href.split("#")[0]); link.remove(); }
+          link=document.createElement("a"); link.rel="ar"; link.className="go"; link.href=URL.createObjectURL(blob)+"#allowsContentScaling=0"; link.download="mirad-bathroom.usdz";
+          const im=document.createElement("img"); im.alt=""; im.width=im.height=1; im.src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="; link.append(im,"Open in AR"); bar.appendChild(link); b.hidden=true; sig=JSON.stringify(readState());
+          note("Ready. Press “Open in AR”, then point the phone at the floor.");
+        }catch(e){ note("The AR file could not be made here."); } b.disabled=false; b.textContent="See it in my room"; },true);
+      setInterval(()=>{ if(link&&sig!==JSON.stringify(readState())){ URL.revokeObjectURL(link.href.split("#")[0]); link.remove(); link=null; b.hidden=false; } },1500); // the design changed: make a fresh file next time
+    }
+    if(!any) button("AR / VR",()=>note(tip?"":HELP,true));
+    else button("?",()=>note(tip?"":HELP,true)).setAttribute("aria-label","How AR and VR work");
+  }
+  setup();
+  return {get state(){ return S; },rig,start,makeUsdz,act,tapFloor};
+})();
 
 resize(); { const st=readState(); lastShape=JSON.stringify([st.L,st.W,st.H]); build(st); } setView("orbit"); tick();
 })();

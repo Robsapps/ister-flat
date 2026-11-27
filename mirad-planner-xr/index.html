@@ -1421,7 +1421,7 @@ renderer.domElement.addEventListener("pointermove",e=>{ if(!drag)return; yawPitc
 const ray=new THREE.Raycaster(), ndc=new THREE.Vector2(), tmpV=new THREE.Vector3();
 renderer.domElement.style.touchAction="none"; renderer.domElement.addEventListener("contextmenu",e=>e.preventDefault());
 let hold=null, carry=null, doorRaf=0;
-function aimRay(e){ const r=renderer.domElement.getBoundingClientRect(); ndc.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1); ray.setFromCamera(ndc,camera); }
+function aimRay(e){ if(e.xrRay){ ray.ray.copy(e.xrRay); return; } const r=renderer.domElement.getBoundingClientRect(); ndc.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1); ray.setFromCamera(ndc,camera); }
 function pickTarget(e){
   aimRay(e);
   const hits=ray.intersectObjects([...fixtures.filter(f=>f.visible),...doorParts,...winParts],true);
@@ -1941,7 +1941,37 @@ const XR=(()=>{
       fixtures.forEach(f=>f.visible=true);
       catcher.scale.set(dims.L+1,1,dims.W+1); catcher.visible=S.placed&&S.tiles===0; }
     else { fadeWalls(); catcher.visible=false; }
+    if(carry){ scene.remove(carry.box); carry=null; } S.grab=-1;
+    room.updateMatrixWorld(true); S.boxes=fixtures.map(f=>({f,box:new THREE.Box3().setFromObject(f)})); S.hover=[null,null]; glow.visible=false; // boxes for pointing at items with a controller
     renderer.shadowMap.needsUpdate=true; }
+
+  // ----- headset: point at an item, hold the trigger to move it, A / B to try other models -----
+  const glow=new THREE.Box3Helper(new THREE.Box3(),0x19b5cf); glow.visible=false; glow.material.depthTest=false; glow.material.transparent=true; glow.renderOrder=15;
+  const aimDot=new THREE.Mesh(new THREE.SphereGeometry(0.012,12,8),new THREE.MeshBasicMaterial({color:0xffffff,depthTest:false,transparent:true})); aimDot.renderOrder=21; aimDot.visible=false;
+  const xrRay=new THREE.Ray(), hitP=new THREE.Vector3();
+  function pointAt(i){ // nearest item whose box the controller's ray enters
+    xrRay.origin.copy(rays[i].position).applyMatrix4(rig.matrixWorld); xrRay.direction.set(0,0,-1).applyQuaternion(rays[i].quaternion).transformDirection(rig.matrixWorld);
+    let best=null, bd=6; for(const b of S.boxes){ if(!b.f.visible||b.box.containsPoint(xrRay.origin)) continue; if(xrRay.intersectBox(b.box,hitP)){ const d=hitP.distanceTo(xrRay.origin); if(d<bd){ bd=d; best={f:b.f,box:b.box,point:hitP.clone()}; } } }
+    return best; }
+  function grab(i){ const h=S.hover[i]; if(!h||carry||S.grab>=0) return false; const s=lastState, p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p) return false;
+    const info={uid:p.uid||p.key,key:p.key,wall:p.wall,s:p.s,out:p.out||0,w:p.w,d:p.d,free:isFree(p.key,p.prod),orig:{wall:p.wall,s:p.s,out:p.out||0}};
+    const y=clamp(h.point.y,0.02,2.3), u=wallUnder({xrRay},y);
+    carry={...info,obj:h.f,y,off:u&&u.wall===info.wall?clamp(u.along-info.s,0,info.w):info.w/2,moved:true};
+    if(carry.free&&u){ const a=alongOn(carry.wall,u); carry.off=clamp(a.along-info.s,0,info.w); carry.offD=clamp(a.dist-info.out,0,info.d); }
+    carry.box=new THREE.BoxHelper(h.f,0x19b5cf); scene.add(carry.box); S.grab=i; glow.visible=false; pulse(i,0.5,40);
+    say(["Moving it","Slide it along the walls","Let go of the trigger to put it down"],3500); return true; }
+  function letGo(i){ if(S.grab!==i||!carry) return; S.grab=-1; dropCarry(); pulse(i,0.4,30); }
+  function otherModel(i,dir){ const h=S.hover[i]; if(!h||carry) return false; const p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p||!p.prod) return false;
+    const sel=$("prod-"+p.key), list=(sel&&sel.tagName==="SELECT")?[...sel.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key);
+    if(list.length<2){ say(["Only one model of this kind","in the catalogue so far"],3000); return true; }
+    const n=list.length, at=Math.max(0,list.findIndex(x=>x.id===p.prod.id)), pr=list[((at+dir)%n+n)%n], it=ITEMS.find(x=>x.key===p.key), uid=p.uid||p.key;
+    if(it&&it.multi){ const old=document.querySelector(`input[data-cat="${p.key}"][value="${p.prod.id}"]`), nu=document.querySelector(`input[data-cat="${p.key}"][value="${pr.id}"]`);
+      if(!nu) return true; if(old) old.checked=false; nu.checked=true;
+      if(MANUAL[uid]){ const nuid=uid.replace(p.prod.id,pr.id); if(nuid!==uid){ MANUAL[nuid]=MANUAL[uid]; delete MANUAL[uid]; } } }
+    else if(sel) sel.value=pr.id; else return true;
+    rebuild(); pulse(i,0.3,25);
+    say([pr.name,`${list.indexOf(pr)+1} of ${n} · ${eur(priceOf(pr))}`,"A / X: next model · B / Y: previous"],6000); return true; }
+  function pulse(i,v,ms){ try{ for(const src of S.session.inputSources){ if((src.handedness==="left"?0:1)===i&&src.gamepad&&src.gamepad.hapticActuators&&src.gamepad.hapticActuators[0]) src.gamepad.hapticActuators[0].pulse(v,ms); } }catch(e){} }
 
   function bestWall(len){ const d=wallDefs(dims.L,dims.W); return WALL_ORDER.reduce((a,k)=>Math.abs(d[k].len-len)<Math.abs(d[a].len-len)-0.005?k:a,"north"); }
   function alignRig(){ // lay the chosen design wall onto the two tapped corners: its left end (seen from inside) on the first tap
@@ -1955,7 +1985,7 @@ const XR=(()=>{
     v1.set(rx,0,rz).applyAxisAngle(UP,rig.rotation.y); rig.position.x-=v1.x; rig.position.z-=v1.z; }
   function placedHelp(){ const cm=Math.round(S.p1.distanceTo(S.p2)*100), w=wallDefs(dims.L,dims.W)[S.wall], wcm=Math.round(w.len*100), off=Math.abs(cm-wcm)>8?` You measured ${cm} cm; this wall is ${wcm} cm in the plan.`:"";
     if(S.handheld) say(`Placed at true size.${off} Drag to slide it, twist with two fingers to turn it. "Next wall" if it sits the wrong way round.`);
-    else say(["Placed at true size",off.trim()||"Walk around and look","Left stick slides it · right stick turns it","Grip: next wall · other grip: other side","A / X: tiles on or off · B / Y: start again"].filter(Boolean),14000); }
+    else say(["Placed at true size",off.trim()||"Walk around and look","Left stick slides it · right stick turns it","Grip: next wall · other grip: other side","A / X: tiles · B / Y: start again","Point at an item: trigger moves it, A / B swaps it"].filter(Boolean),14000); }
   function startPlacing(){ S.placed=false; S.p1=S.p2=null; pin.visible=span.visible=false; rig.position.set(0,0,0); rig.rotation.set(0,0,0); rig.updateMatrixWorld(true);
     btnsEl.querySelectorAll("[data-x=wall],[data-x=flip],[data-x=tiles],[data-x=again]").forEach(b=>b.hidden=true);
     applyVis();
@@ -2002,6 +2032,8 @@ const XR=(()=>{
     }
     const b=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed), edge=(i,name)=>{ const p=b(i), was=st[name]; st[name]=p; return p&&!was; };
     const a=edge(4,"a"), bb=edge(5,"b");
+    const i=left?0:1, rpt=(name,on)=>{ if(!on){ st[name+"T"]=0; return false; } const t=performance.now(); if(!st[name+"T"]){ st[name+"T"]=t+550; return true; } if(t>st[name+"T"]){ st[name+"T"]=t+280; return true; } return false; }; // hold the button to keep stepping
+    if(S.hover[i]&&!carry&&S.placed){ if(rpt("a",b(4))) otherModel(i,1); if(rpt("b",b(5))) otherModel(i,-1); return; }
     if(S.mode==="ar"){ if(a) act.tiles(); if(bb) act.again(); }
     else if(a||bb){ S.needStart=true; say(["Back at the door"],2500); } }
 
@@ -2022,7 +2054,13 @@ const XR=(()=>{
         if(rp){ seen[i]=true; rays[i].matrix.fromArray(rp.transform.matrix); rays[i].matrix.decompose(rays[i].position,rays[i].quaternion,rays[i].scale);
           if(!aim||src===S.lastSrc||(i===1&&aim.src!==S.lastSrc)) aim={src,o:rays[i].position.clone(),d:new THREE.Vector3(0,0,-1).applyQuaternion(rays[i].quaternion)}; }
         sticks(src,st,dt); }
-      rays.forEach((r,i)=>r.visible=seen[i]&&S.mode==="ar"&&!S.placed);
+      rays.forEach((r,i)=>r.visible=seen[i]&&!S.handheld);
+      // pointing at items, and carrying one
+      if(S.placed&&!S.handheld&&S.boxes){ let shown=null;
+        for(let i=1;i>=0;i--){ S.hover[i]=seen[i]&&!carry?pointAt(i):null; if(S.hover[i]&&(!shown||S.lastHand===i)) shown=S.hover[i]; }
+        if(carry&&S.grab>=0){ if(seen[S.grab]){ pointAt(S.grab); moveCarry({xrRay}); } shown=null; }
+        glow.visible=!!shown; aimDot.visible=!!shown; if(shown){ glow.box.copy(shown.box); aimDot.position.copy(shown.point); }
+      } else { glow.visible=aimDot.visible=false; }
       // where the floor is being pointed at
       if(S.mode==="ar"&&!S.placed){ S.hit=null;
         if(S.hitSrc){ const hr=xf.getHitTestResults(S.hitSrc); if(hr.length){ const hp=hr[0].getPose(ref); if(hp){ const q=hp.transform.position; S.hit=new THREE.Vector3(q.x,q.y,q.z); } } }
@@ -2041,28 +2079,31 @@ const XR=(()=>{
 
   async function begin(mode,session){
     const prev={view,bg:scene.background,winShadow:winLight.castShadow};
-    S={mode,session,prev,handheld:!!session.domOverlayState||(isPhone&&mode==="ar"),placed:mode==="vr",tiles:0,pads:[{},{}],head:false,headM:new THREE.Matrix4(),headL:new THREE.Vector3(),headW:new THREE.Vector3(),needStart:mode==="vr",panelUntil:0,room:null,hit:null,hitSrc:null,wantHit:false,lastSrc:null};
+    S={mode,session,prev,handheld:!!session.domOverlayState||(isPhone&&mode==="ar"),placed:mode==="vr",tiles:0,pads:[{},{}],head:false,headM:new THREE.Matrix4(),headL:new THREE.Vector3(),headW:new THREE.Vector3(),needStart:mode==="vr",panelUntil:0,room:null,boxes:null,hover:[null,null],grab:-1,lastHand:1,hit:null,hitSrc:null,wantHit:false,lastSrc:null};
     if(swapper) closeSwapper();
     setView("walk"); orbit.enabled=false; $("pad").hidden=true;
-    rig.position.set(0,0,0); rig.rotation.set(0,0,0); scene.add(rig); scene.add(catcher); rig.add(camera);
+    rig.position.set(0,0,0); rig.rotation.set(0,0,0); scene.add(rig); scene.add(catcher); scene.add(glow); scene.add(aimDot); rig.add(camera);
     if(mode==="ar"){ scene.background=null; renderer.setClearColor(0x000000,0); }
     if(isHeadset) winLight.castShadow=false; // one shadow light is plenty for a headset's chip
     renderer.xr.enabled=true; renderer.xr.setReferenceSpaceType("local-floor");
     session.addEventListener("end",finish);
     session.addEventListener("select",e=>{ if(!S) return; S.lastSrc=e.inputSource; tapFloor(); });
+    session.addEventListener("selectstart",e=>{ if(!S||!S.placed||S.handheld) return; const i=e.inputSource.handedness==="left"?0:1; S.lastHand=i; grab(i); });
+    session.addEventListener("selectend",e=>{ if(!S) return; letGo(e.inputSource.handedness==="left"?0:1); });
     session.addEventListener("squeeze",e=>{ if(!S||S.mode!=="ar") return; (e.inputSource.handedness==="left"?act.flip:act.wall)(); });
     try{ await renderer.xr.setSession(session); }catch(e){ try{ session.end(); }catch(_){ } finish(); note("AR / VR could not start on this device."); return; }
     try{ const layer=session.renderState.baseLayer; if(layer&&"fixedFoveation" in layer) layer.fixedFoveation=1; }catch(e){}
     if(mode==="ar"&&session.requestHitTestSource&&S.handheld){ S.wantHit=true;
       session.requestReferenceSpace("viewer").then(vs=>session.requestHitTestSource({space:vs})).then(h=>{ if(S) S.hitSrc=h; }).catch(()=>{ if(S) S.wantHit=false; }); }
     if(S.handheld) ui.classList.add("on");
-    if(mode==="ar") startPlacing(); else { applyVis(); say(["You are standing in the bathroom","Left stick: walk · right stick: turn","Or simply walk around for real","A or B: back to the door","Meta button: leave"],12000); }
+    if(mode==="ar") startPlacing(); else { applyVis(); say(["You are standing in the bathroom","Left stick: walk · right stick: turn","Point at an item and hold the trigger to move it","Point at an item and press A or B for other models","Meta button: leave"],16000); }
     renderer.setAnimationLoop(frame);
   }
   function finish(){ if(!S) return; const prev=S.prev; S=null;
     renderer.setAnimationLoop(null); renderer.xr.enabled=false;
     ui.classList.remove("on"); touches.clear();
-    [reticle,pin,span,panel,...rays].forEach(o=>o.visible=false); catcher.visible=false;
+    [reticle,pin,span,panel,...rays].forEach(o=>o.visible=false); catcher.visible=false; glow.visible=aimDot.visible=false; scene.remove(glow); scene.remove(aimDot);
+    if(carry){ scene.remove(carry.box); carry=null; }
     scene.remove(catcher); rig.remove(camera); scene.remove(rig); camera.position.set(0,1.6,0); camera.quaternion.set(0,0,0,1); camera.scale.set(1,1,1); camera.updateMatrixWorld(true);
     scene.background=prev.bg; setSceneBg(); winLight.castShadow=prev.winShadow;
     build(readState()); setView(prev.view); resize(); invalidate(); }
