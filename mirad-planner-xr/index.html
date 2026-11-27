@@ -1190,7 +1190,15 @@ function requestModel(file){
     const geos=[]; gl.scene.updateMatrixWorld(true);
     gl.scene.traverse(o=>{ if(!o.isMesh) return; const g=o.geometry.clone(); dequant(g); g.applyMatrix4(o.matrixWorld); if(!g.attributes.normal) g.computeVertexNormals(); g.computeBoundingBox(); g.computeBoundingSphere(); g.userData.shared=true; geos.push(g); });
     if(!geos.length){ OFF_STATE[file]="failed"; return; }
-    const box=new THREE.Box3(); geos.forEach(g=>box.union(g.boundingBox)); OFFICIAL[file]={geos,box}; OFF_STATE[file]="ready";
+    let box=new THREE.Box3(); geos.forEach(g=>box.union(g.boundingBox));
+    const bs=box.getSize(new THREE.Vector3()), cats=new Set(PRODUCTS.filter(q=>mfOf(q)===file).map(q=>q.cat));
+    if(Math.max(bs.x,bs.y,bs.z)<0.25&&(cats.has("tub")||cats.has("vanity")||cats.has("wc"))){ OFF_STATE[file]="failed"; return; } // a broken, tiny file: keep the drawn look
+    // some files are drawn turned sideways: baths and basins long side front to back, toilets with the long side along the wall. Turn them the right way.
+    const turn=(cats.has("tub")&&bs.z>bs.x*1.2)?1:(cats.has("vanity")&&bs.z>bs.x*1.3)?1:(cats.has("wc")&&bs.x>bs.z*1.05)?2:0;
+    if(turn){ let ang=-Math.PI/2;
+      if(turn===2){ let sx=0,n=0; const top=box.min.y+bs.y*0.75; geos.forEach(g=>{ const a=g.attributes.position; for(let v=0;v<a.count;v++) if(a.getY(v)>top){ sx+=a.getX(v); n++; } });
+        if(n&&sx/n>(box.min.x+box.max.x)/2) ang=Math.PI/2; } // the cistern (the tall end) goes to the wall
+      geos.forEach(g=>{ g.rotateY(ang); g.computeBoundingBox(); g.computeBoundingSphere(); }); box=new THREE.Box3(); geos.forEach(g=>box.union(g.boundingBox)); } OFFICIAL[file]={geos,box}; OFF_STATE[file]="ready";
     const sz=box.getSize(new THREE.Vector3());
     PRODUCTS.forEach(q=>{ if(mfOf(q)===file&&q.est){ q.w=Math.round(sz.x*100); q.d=Math.round(sz.z*100); q.h=Math.round(sz.y*100); delete q.est; } }); // real size from the model
     if(swapper) swapper.items.forEach((w,i)=>{ if(w&&mfOf(swapper.list[i])===file){ swapper.group.remove(w); swapper.items[i]=null; } });
@@ -1728,12 +1736,30 @@ const swShade=(()=>{ const c=document.createElement("canvas"); c.width=256; c.he
 // products of the catalogue without their own 3D model share one generic look per kind; the carousel shows each look once,
 // models with their own look first. The left panel still lists every product.
 const LOOK_SKIP=new Set(["id","cat","name","price","url","brand","thumb","est","w","d","h","parts","glass","y0","m3d","mf"]);
-function lookKey(p){ if(!p.id.startsWith("cat-")||MODEL_GEO[p.id]||(MODELS_REACHABLE&&mfOf(p))) return "own:"+p.id;
+function lookKey(p){ if(!p.id.startsWith("cat-")||MODEL_GEO[p.id]) return "own:"+p.id;
+  if(MODELS_REACHABLE&&OFF_KEYS.has(p.cat)&&mfOf(p)) return "mf:"+p.cat+":"+mfOf(p)+":"+(p.finish||"")+":"+(p.color||""); // same model file in the same colour = one look; other colours stay // a model file only counts where the planner draws it (not taps or showers yet)
   return p.cat+"|"+(p.cat==="bathtap"?tapStyle(p):"")+"|"+Object.keys(p).filter(k=>!LOOK_SKIP.has(k)).sort().map(k=>k+"="+p[k]).join(","); }
+// Products whose details differ but whose drawn look comes out the same (same parts, same colours, only the size differs) are one look too:
+// each generic look is drawn once off-screen and compared by its parts and colours.
+const LOOK_SIG=new Map();
+function drawnSig(prod,place){
+  const ck=place.key+"#"+lookKey(prod); if(LOOK_SIG.has(ck)) return LOOK_SIG.get(ck);
+  const keepDecor=CUR_DECOR, keepPlant=PLANT_DONE; CUR_DECOR=false; PLANT_DONE=true; let g=null, sig=ck;
+  try{ if(place.tapOnly){ g=new THREE.Group(); bathTapModel(g,prod,{x:0,y:0.6,z:0,dx:0,dz:1}); }
+    else g=makeFixture(Object.assign({},place,{prod,w:prod.w||place.w,d:prod.d||place.d,uid:"sig"}),lastState);
+    const parts=[]; g.traverse(o=>{ if(!o.isMesh) return; const m=Array.isArray(o.material)?o.material[0]:o.material, pos=o.geometry&&o.geometry.attributes.position;
+      parts.push((o.geometry?o.geometry.type:"")+":"+(pos?pos.count:0)+":"+(m&&m.color?m.color.getHexString():"")+(m&&m.map?"t":"")+(m&&m.metalness>0.5?"m":"")+(m&&m.transparent?"g":""));
+      if(o.geometry&&!o.geometry.userData.shared) o.geometry.dispose(); });
+    sig="drawn:"+place.key+":"+parts.sort().join("|");
+  }catch(e){} finally{ CUR_DECOR=keepDecor; PLANT_DONE=keepPlant; }
+  LOOK_SIG.set(ck,sig); return sig; }
 function lookGroups(all,cur){ const own=[], gen=new Map();
-  all.forEach(p=>{ const k=lookKey(p); if(k.startsWith("own:")) own.push(p); else { if(!gen.has(k)) gen.set(k,[]); gen.get(k).push(p); } });
+  const mfg=new Map();
+  all.forEach(p=>{ const k=lookKey(p); if(k.startsWith("own:")) own.push(p); else { const m=k.startsWith("mf:")?mfg:gen; if(!m.has(k)) m.set(k,[]); m.get(k).push(p); } });
+  const cat=(all[0]||{}).cat, place=!cat||typeof lastPlaced==="undefined"?null:cat==="bathtap"?{key:"bathtap",uid:"bathtap",tapOnly:true}:lastPlaced.find(q=>q.key===cat&&!q.attached);
+  if(place&&gen.size>1){ const merged=new Map(); gen.forEach(ms=>{ const sg=drawnSig(ms[0],place); if(!merged.has(sg)) merged.set(sg,[]); merged.get(sg).push(...ms); }); gen.clear(); merged.forEach((ms,k)=>gen.set(k,ms)); }
   const list=[...own], groups=own.map(()=>1);
-  gen.forEach(ms=>{ list.push(cur&&ms.includes(cur)?cur:ms[0]); groups.push(ms.length); });
+  [mfg,gen].forEach(m=>m.forEach(ms=>{ list.push(cur&&ms.includes(cur)?cur:ms[0]); groups.push(ms.length); }));
   return {list,groups}; }
 function openSwapper(obj,tap){
   let p;
@@ -2081,12 +2107,35 @@ const XR=(()=>{
     xrRay.origin.copy(rays[i].position).applyMatrix4(rig.matrixWorld); xrRay.direction.set(0,0,-1).applyQuaternion(rays[i].quaternion).transformDirection(rig.matrixWorld);
     let best=null, bd=6; for(const b of S.boxes){ if(!b.f.visible||b.box.containsPoint(xrRay.origin)) continue; if(xrRay.intersectBox(b.box,hitP)){ const d=hitP.distanceTo(xrRay.origin)-(b.tap?10:0); if(d<bd){ bd=d; best={f:b.f,tap:b.tap,box:b.box,point:hitP.clone()}; } } } // a tap wins over the bath it sits on
     return best; }
-  function grab(i){ const h=S.hover[i]; if(!h||carry||S.grab>=0) return false; pointAt(i); const s=lastState, p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p) return false;
+  // Where a held item should go. The controller's ray is steadied, then followed to the wall or floor it lands on, so the item sits under the
+  // pointer dot as if attached. It stays on its wall until the pointer is clearly nearer another one, and it glides instead of jumping.
+  // The planner's own moveCarry() does the placing: it is handed a straight-down ray through the spot we chose.
+  const sm={o:new THREE.Vector3(),d:new THREE.Vector3(),p:new THREE.Vector3(),wall:"",ok:false}, WN={north:[0,-1],south:[0,1],west:[-1,0],east:[1,0]};
+  function aimCarry(i,dt,fresh){
+    v1.copy(rays[i].position).applyMatrix4(rig.matrixWorld); v2.set(0,0,-1).applyQuaternion(rays[i].quaternion).transformDirection(rig.matrixWorld);
+    if(fresh||!sm.ok){ sm.o.copy(v1); sm.d.copy(v2); } else { const a=1-Math.exp(-dt/0.07); sm.o.lerp(v1,a); sm.d.lerp(v2,a).normalize(); }
+    const hx=dims.L/2, hz=dims.W/2, o=sm.o, d=sm.d, big=1e9;
+    const ox=clamp(o.x,-hx+0.01,hx-0.01), oy=clamp(o.y,0.01,dims.H-0.01), oz=clamp(o.z,-hz+0.01,hz-0.01); // treat a hand outside the room as just inside it
+    const tx=d.x>1e-6?(hx-ox)/d.x:d.x<-1e-6?(-hx-ox)/d.x:big, tz=d.z>1e-6?(hz-oz)/d.z:d.z<-1e-6?(-hz-oz)/d.z:big, gy=carry&&carry.y!==undefined?clamp(carry.y,0.02,dims.H-0.02):0, ty=d.y<-1e-6?(oy>gy?(gy-oy)/d.y:-oy/d.y):d.y>1e-6?(oy<gy?(gy-oy)/d.y:(dims.H-oy)/d.y):big, t=Math.min(tx,ty,tz); // stop at the height the item was grabbed at, or at a wall if that comes first
+    const px=clamp(ox+d.x*t,-hx,hx), py=clamp(oy+d.y*t,0,dims.H), pz=clamp(oz+d.z*t,-hz,hz);
+    const dist={north:pz+hz,south:hz-pz,west:px+hx,east:hx-px}; let wall;
+    if(t===tx) wall=d.x>0?"east":"west"; else if(t===tz) wall=d.z>0?"south":"north";
+    else { wall=Object.keys(dist).sort((a,b)=>dist[a]-dist[b])[0]; const cur=fresh?(carry&&carry.wall):sm.wall; if(cur&&dist[cur]!==undefined&&dist[cur]<dist[wall]+0.3) wall=cur; } // on the floor: keep the wall it is on unless another is clearly nearer
+    let fx=px, fz=pz;
+    if(!(carry&&carry.free)){ const n=WN[wall], m=0.03; // pin the spot to the chosen wall, a hair inside the room and clear of the corners
+      if(n[0]){ fx=n[0]*(hx-0.01); fz=clamp(pz,-hz+m,hz-m); } else { fz=n[1]*(hz-0.01); fx=clamp(px,-hx+m,hx-m); } }
+    if(fresh||!sm.ok||wall!==sm.wall) sm.p.set(fx,0,fz); else sm.p.lerp(v1.set(fx,0,fz),1-Math.exp(-dt/0.05));
+    sm.wall=wall; sm.ok=true; xrRay.origin.set(sm.p.x,3.2,sm.p.z); xrRay.direction.set(0,-1,0);
+    aimDot.position.set(px,py,pz); return wall; }
+  function grab(i){ const h=S.hover[i]; if(!h||carry||S.grab>=0) return false; const s=lastState, p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p) return false;
     const info={uid:p.uid||p.key,key:p.key,wall:p.wall,s:p.s,out:p.out||0,w:p.w,d:p.d,free:isFree(p.key,p.prod),orig:{wall:p.wall,s:p.s,out:p.out||0}};
-    const y=clamp(h.point.y,0.02,2.3), u=wallUnder({xrRay},y);
-    carry={...info,obj:h.f,y,off:u&&u.wall===info.wall?clamp(u.along-info.s,0,info.w):info.w/2,moved:true};
-    if(carry.free&&u){ const a=alongOn(carry.wall,u); carry.off=clamp(a.along-info.s,0,info.w); carry.offD=clamp(a.dist-info.out,0,info.d); }
-    carry.box=new THREE.BoxHelper(h.f,0x19b5cf); scene.add(carry.box); S.grab=i; glow.visible=false; pulse(i,0.5,40);
+    const y=clamp(h.point.y,0.02,2.3); carry={wall:info.wall,free:info.free,y}; aimCarry(i,0,true); const u=wallUnder({xrRay},y); // the first aim keeps the item's own wall
+    carry={...info,obj:h.f,y,off:u&&u.wall===info.wall?u.along-info.s:info.w/2,moved:true}; // keep the exact offset, so nothing jumps when you take hold
+    if(carry.free&&u){ const a=alongOn(carry.wall,u); carry.off=a.along-info.s; carry.offD=a.dist-info.out; }
+    { const o=h.f, kp=o.position.clone(), kr=o.rotation.clone(); o.position.set(0,0,0); o.rotation.set(0,0,0); o.updateMatrixWorld(true); // a light outline that rides on the item (re-measuring a detailed model every frame is what made it stutter)
+      const lb=new THREE.Box3().setFromObject(o); lb.translate(v1.setFromMatrixPosition(o.parent.matrixWorld).negate()); o.position.copy(kp); o.rotation.copy(kr); o.updateMatrixWorld(true);
+      const hb=new THREE.Box3Helper(lb,0x19b5cf); hb.material.depthTest=false; hb.material.transparent=true; hb.renderOrder=15; o.add(hb); }
+    carry.box=new THREE.Object3D(); carry.box.update=()=>{}; scene.add(carry.box); S.grab=i; glow.visible=false; pulse(i,0.5,40);
     say(["Moving it","Slide it along the walls","Let go of the trigger to put it down"],3500); return true; }
   function letGo(i){ if(S.grab!==i||!carry) return; S.grab=-1; dropCarry(); pulse(i,0.4,30); }
   function modelCtx(h){ if(!h) return null; let p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached);
@@ -2226,8 +2275,8 @@ const XR=(()=>{
       else if(S.placed&&!S.handheld&&S.boxes){ let shown=null;
         if(S.press&&!carry){ const pr=S.press; pointAt(pr.i); if(performance.now()-pr.t>280||xrRay.direction.angleTo(pr.dir)>0.07){ S.press=null; S.hover[pr.i]=pr.h; grab(pr.i); } } // held or dragged: move it
         for(let i=1;i>=0;i--){ S.hover[i]=seen[i]&&!carry?pointAt(i):null; if(S.hover[i]&&(!shown||S.lastHand===i)) shown=S.hover[i]; }
-        if(carry&&S.grab>=0){ if(seen[S.grab]){ pointAt(S.grab); moveCarry({xrRay}); } shown=null; }
-        glow.visible=!!shown; aimDot.visible=!!shown; tag.visible=!!shown; if(shown){ glow.box.copy(shown.box); aimDot.position.copy(shown.point); shown.box.getCenter(v1); tag.position.set(v1.x,Math.min(shown.box.max.y+0.09,2.25),v1.z); tag.rotation.set(0,Math.atan2(S.headW.x-v1.x,S.headW.z-v1.z),0); tag.scale.setScalar(clamp(S.headW.distanceTo(v1)*0.6,0.7,2.4)); } // the hint grows with distance so it stays readable
+        if(carry&&S.grab>=0){ if(seen[S.grab]){ aimCarry(S.grab,dt); moveCarry({xrRay}); } shown=null; }
+        glow.visible=!!shown; aimDot.visible=!!shown||!!(carry&&S.grab>=0); tag.visible=!!shown; if(shown){ glow.box.copy(shown.box); aimDot.position.copy(shown.point); shown.box.getCenter(v1); tag.position.set(v1.x,Math.min(shown.box.max.y+0.09,2.25),v1.z); tag.rotation.set(0,Math.atan2(S.headW.x-v1.x,S.headW.z-v1.z),0); tag.scale.setScalar(clamp(S.headW.distanceTo(v1)*0.6,0.7,2.4)); } // the hint grows with distance so it stays readable
       } else { glow.visible=aimDot.visible=tag.visible=false; }
       // where the floor is being pointed at
       if(S.mode==="ar"&&!S.placed){ S.hit=null;
