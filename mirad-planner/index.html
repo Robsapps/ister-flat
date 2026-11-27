@@ -1991,7 +1991,8 @@ const XR=(()=>{
       catcher.scale.set(dims.L+1,1,dims.W+1); catcher.visible=S.placed&&S.tiles===0; }
     else { fadeWalls(); catcher.visible=false; }
     if(carry){ scene.remove(carry.box); carry=null; } S.grab=-1;
-    room.updateMatrixWorld(true); S.boxes=fixtures.map(f=>({f,box:new THREE.Box3().setFromObject(f)})); S.hover=[null,null]; glow.visible=false; // boxes for pointing at items with a controller
+    room.updateMatrixWorld(true); S.boxes=fixtures.map(f=>({f,box:new THREE.Box3().setFromObject(f)}));
+    fixtures.forEach(f=>f.traverse(c=>{ if(c.userData.tapKey) S.boxes.unshift({f,tap:c,box:new THREE.Box3().setFromObject(c).expandByScalar(0.04)}); })); // the bath tap is its own target, a little larger so it is easy to hit S.hover=[null,null]; glow.visible=false; // boxes for pointing at items with a controller
     renderer.shadowMap.needsUpdate=true; }
 
   // ----- headset: point at an item, hold the trigger to move it, A / B to try other models -----
@@ -2000,7 +2001,7 @@ const XR=(()=>{
   const xrRay=new THREE.Ray(), hitP=new THREE.Vector3();
   function pointAt(i){ // nearest item whose box the controller's ray enters
     xrRay.origin.copy(rays[i].position).applyMatrix4(rig.matrixWorld); xrRay.direction.set(0,0,-1).applyQuaternion(rays[i].quaternion).transformDirection(rig.matrixWorld);
-    let best=null, bd=6; for(const b of S.boxes){ if(!b.f.visible||b.box.containsPoint(xrRay.origin)) continue; if(xrRay.intersectBox(b.box,hitP)){ const d=hitP.distanceTo(xrRay.origin); if(d<bd){ bd=d; best={f:b.f,box:b.box,point:hitP.clone()}; } } }
+    let best=null, bd=6; for(const b of S.boxes){ if(!b.f.visible||b.box.containsPoint(xrRay.origin)) continue; if(xrRay.intersectBox(b.box,hitP)){ const d=hitP.distanceTo(xrRay.origin)-(b.tap?10:0); if(d<bd){ bd=d; best={f:b.f,tap:b.tap,box:b.box,point:hitP.clone()}; } } } // a tap wins over the bath it sits on
     return best; }
   function grab(i){ const h=S.hover[i]; if(!h||carry||S.grab>=0) return false; const s=lastState, p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p) return false;
     const info={uid:p.uid||p.key,key:p.key,wall:p.wall,s:p.s,out:p.out||0,w:p.w,d:p.d,free:isFree(p.key,p.prod),orig:{wall:p.wall,s:p.s,out:p.out||0}};
@@ -2010,7 +2011,9 @@ const XR=(()=>{
     carry.box=new THREE.BoxHelper(h.f,0x19b5cf); scene.add(carry.box); S.grab=i; glow.visible=false; pulse(i,0.5,40);
     say(["Moving it","Slide it along the walls","Let go of the trigger to put it down"],3500); return true; }
   function letGo(i){ if(S.grab!==i||!carry) return; S.grab=-1; dropCarry(); pulse(i,0.4,30); }
-  function otherModel(i,dir){ const h=S.hover[i]; if(!h||carry) return false; const p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p||!p.prod) return false;
+  function otherModel(i,dir){ const h=S.hover[i]; if(!h||carry) return false; let p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached);
+    if(h.tap){ const k=h.tap.userData.tapKey, e=$("prod-"+k), pr0=e&&byId(e.value); if(!pr0) return false; p={key:k,uid:k,prod:pr0}; } // the bath tap on its own
+    if(!p||!p.prod) return false;
     const sel=$("prod-"+p.key), list=(sel&&sel.tagName==="SELECT")?[...sel.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key);
     if(list.length<2){ say(["Only one model of this kind","in the catalogue so far"],3000); return true; }
     const n=list.length, at=Math.max(0,list.findIndex(x=>x.id===p.prod.id)), pr=list[((at+dir)%n+n)%n], it=ITEMS.find(x=>x.key===p.key), uid=p.uid||p.key;
@@ -2215,7 +2218,104 @@ const XR=(()=>{
     else button("?",()=>note(tip?"":HELP,true)).setAttribute("aria-label","How AR and VR work");
   }
   setup();
-  return {get state(){ return S; },rig,start,makeUsdz,act,tapFloor};
+  return {get state(){ return S; },bar,rig,start,makeUsdz,act,tapFloor};
+})();
+
+// ---------- Linked devices: the same bathroom live on a tablet and in the headset ----------
+// Two or more devices that use the same 6-digit code show the same design. A change on any of them (room size, tiles, products,
+// an item moved or swapped, also from inside VR) reaches the others within a moment.
+// The devices talk to each other directly (WebRTC, through the free PeerJS library and its public meeting point), so no account
+// or server of our own is needed. Only the design travels: sizes, chosen products and positions.
+// How it notices changes: four times a second it compares the form and the hand-moved positions with what it last sent.
+// build.py pastes this file into the page in place of the /*SYNC*/ marker, inside the planner's own script, after xr.src.js.
+const LINK=(()=>{
+  const PEER_JS="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js", PREFIX="mirad-planner-link-", KEY="mirad-link-code";
+  const qs=new URLSearchParams(location.search), vrPage=qs.has("vr");
+  const store={get(){ try{ return localStorage.getItem(KEY)||""; }catch(e){ return ""; } }, set(v){ try{ v?localStorage.setItem(KEY,v):localStorage.removeItem(KEY); }catch(e){} }};
+  const clean=v=>String(v||"").replace(/\D/g,"").slice(0,6), pretty=c=>c.slice(0,3)+" "+c.slice(3);
+  let code="", peer=null, host=false, conns=[], status="off", lastSent="", ready=false, applying=false, retry=0, timer=null, gen=0, pop=null;
+
+  // ----- the design as plain data -----
+  const fields=()=>[...document.querySelectorAll("aside.panel input[id], aside.panel select[id]")].filter(e=>e.type!=="file"&&e.type!=="button");
+  function snapshot(){ const v={}; fields().forEach(e=>{ v[e.id]=(e.type==="checkbox"||e.type==="radio")?e.checked:e.value; }); return {v,manual:MANUAL,swing:doorSwing}; }
+  function apply(s){ if(!s||!s.v) return; applying=true;
+    try{ fields().forEach(e=>{ if(!(e.id in s.v)) return; const val=s.v[e.id];
+        if(e.type==="checkbox"||e.type==="radio"){ e.checked=!!val; return; }
+        if(e.tagName==="SELECT"&&![...e.options].some(o=>o.value===val)){ const p=byId(val); if(!p) return; const o=document.createElement("option"); o.value=val; o.textContent=p.name; e.appendChild(o); } // hidden by a search on this device
+        e.value=val; });
+      setSwing(s.swing==="in"?"in":"out"); syncWin(); MANUAL=(s.manual&&typeof s.manual==="object")?s.manual:{};
+      if(typeof swapper!=="undefined"&&swapper) closeSwapper();
+      rebuild(); showWelcome(false); invalidate();
+    }catch(e){} applying=false; lastSent=JSON.stringify(snapshot()); ready=true; } // a device that joins takes over the room's design before it may send its own
+
+  // ----- the connection -----
+  const addJs=src=>new Promise((res,rej)=>{ if(window.Peer) return res(); const s=document.createElement("script"); s.src=src; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+  const peerOpts=()=>Object.assign({debug:0},window.LINK_SERVER||{}); // LINK_SERVER in config.js can point to another meeting point
+  function setStatus(s){ status=s; paint(); }
+  function send(msg,except){ conns.forEach(c=>{ if(c!==except&&c.open) try{ c.send(msg); }catch(e){} }); }
+  function wire(c,g){ c.on("data",m=>{ if(g!==gen||!m) return;
+      if(m.t==="hello"){ c.send({t:"state",s:snapshot()}); return; }
+      if(m.t==="state"){ apply(m.s); if(host) send(m,c); } });
+    c.on("open",()=>{ if(g!==gen) return; if(!conns.includes(c)) conns.push(c); if(!host) c.send({t:"hello"}); setStatus("on"); });
+    const gone=()=>{ if(g!==gen) return; conns=conns.filter(x=>x!==c); if(!host) again(); else setStatus(conns.length?"on":"alone"); };
+    c.on("close",gone); c.on("error",gone); }
+  function again(){ if(!code) return; setStatus("wait"); clearTimeout(timer); timer=setTimeout(connect,600+Math.random()*900+Math.min(retry++,6)*500); }
+  function drop(){ gen++; ready=false; clearTimeout(timer); conns=[]; if(peer){ try{ peer.destroy(); }catch(e){} peer=null; } }
+  async function connect(){ if(!code) return; drop(); const g=gen; setStatus("wait");
+    try{ await addJs(PEER_JS); }catch(e){ setStatus("nolib"); return; }
+    if(g!==gen) return;
+    // first try to be the meeting point for this code; if another device already is, join it
+    host=true; const p=peer=new Peer(PREFIX+code,peerOpts());
+    p.on("open",()=>{ if(g!==gen) return; retry=0; lastSent=JSON.stringify(snapshot()); ready=true; setStatus("alone"); });
+    p.on("connection",c=>{ if(g!==gen) return; wire(c,g); });
+    p.on("disconnected",()=>{ if(g!==gen) return; try{ p.reconnect(); }catch(e){} });
+    p.on("error",err=>{ if(g!==gen) return;
+      if(err&&err.type==="unavailable-id"){ try{ p.destroy(); }catch(e){} join(g); }
+      else if(err&&(err.type==="network"||err.type==="server-error"||err.type==="socket-error"||err.type==="socket-closed")) again(); });
+  }
+  function join(g){ host=false; const p=peer=new Peer(peerOpts());
+    p.on("open",()=>{ if(g!==gen) return; const c=p.connect(PREFIX+code,{reliable:true}); wire(c,g); setTimeout(()=>{ if(g===gen&&!c.open) again(); },9000); });
+    p.on("disconnected",()=>{ if(g!==gen) return; try{ p.reconnect(); }catch(e){} });
+    p.on("error",()=>{ if(g===gen) again(); }); }
+  function link(c){ code=clean(c); if(code.length!==6){ code=""; return false; } store.set(code); retry=0; connect(); return true; }
+  function unlink(){ code=""; store.set(""); drop(); setStatus("off"); }
+  setInterval(()=>{ if(!ready||status!=="on"&&status!=="alone"||applying||carry) return; const s=snapshot(), j=JSON.stringify(s); if(j===lastSent) return; lastSent=j; send({t:"state",s}); },250);
+  window.addEventListener("online",()=>{ if(code&&status!=="on") connect(); });
+  document.addEventListener("visibilitychange",()=>{ if(!document.hidden&&code&&(status==="wait"||status==="off")) connect(); });
+
+  // ----- the button and its little window -----
+  const css=document.createElement("style"); css.textContent=`
+.linkpop{position:absolute;top:100px;left:12px;width:min(340px,calc(100% - 24px));background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:14px;font-size:13px;box-shadow:0 8px 28px rgba(0,0,0,.18);z-index:6;display:flex;flex-direction:column;gap:10px}
+.linkpop h3{margin:0;font:600 15px var(--font-display)}.linkpop p{margin:0;color:var(--muted)}
+.linkpop .code{font:600 30px var(--font-display);letter-spacing:.08em;text-align:center;padding:8px;border-radius:8px;background:var(--accent-soft)}
+.linkpop .row{display:flex;gap:8px}.linkpop input{flex:1;min-width:0;font:600 20px var(--font-display);letter-spacing:.12em;text-align:center;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--fg)}
+.linkpop button{font:inherit;font-weight:600;font-size:13px;border:1px solid var(--line);background:var(--panel);color:var(--fg);padding:10px 12px;border-radius:8px;cursor:pointer}
+.linkpop button.go{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.linkdot{width:9px;height:9px;border-radius:50%;background:#9aa7ab;display:inline-block}.linkdot.on{background:#1faa5f}.linkdot.wait{background:#e0a100}`;
+  document.head.appendChild(css);
+  const btn=document.createElement("button"); btn.type="button"; btn.innerHTML=`<span class="linkdot"></span><span>Link devices</span>`; XR.bar.appendChild(btn);
+  const words={off:"Not linked",wait:"Connecting…",alone:"Waiting for the other device",on:"Linked",nolib:"No internet connection for linking"};
+  const vrUrl=()=>location.origin+location.pathname.replace(/index\.html$/,"").replace(/\/$/,"")+"/vr";
+  function paint(){ const dot=btn.firstChild; dot.className="linkdot"+(status==="on"?" on":status==="wait"||status==="alone"?" wait":""); btn.lastChild.textContent=status==="on"?`Linked · ${conns.length+1} devices`:status==="off"?"Link devices":words[status];
+    if(!pop) return; pop.textContent=""; const el=(t,txt,cls)=>{ const e=document.createElement(t); if(txt) e.textContent=txt; if(cls) e.className=cls; pop.appendChild(e); return e; };
+    el("h3","Same bathroom on two devices");
+    if(code){ el("div",pretty(code),"code"); el("p",words[status]+(status==="on"?`: ${conns.length+1} devices show this bathroom. Change anything on one and the others follow.`:"."));
+      if(status!=="on") el("p",`On the other device open ${vrUrl()} and type this code. In the headset use the Quest browser.`);
+      const r=el("div","","row"), stop=document.createElement("button"); stop.type="button"; stop.textContent="Stop linking"; stop.onclick=()=>{ unlink(); }; const ok=document.createElement("button"); ok.type="button"; ok.className="go"; ok.textContent="Close"; ok.onclick=()=>toggle(false); r.append(stop,ok); }
+    else { el("p","A tablet and a VR headset can show the same bathroom. What one person changes, the other sees straight away.");
+      const start=el("button","Start here and get a code","go"); start.type="button"; start.onclick=()=>link(String(Math.floor(100000+Math.random()*900000)));
+      el("p","Or type the code shown on the other device:");
+      const r=el("div","","row"), inp=document.createElement("input"); inp.inputMode="numeric"; inp.placeholder="000 000"; inp.maxLength=7; inp.setAttribute("aria-label","Code from the other device");
+      const j=document.createElement("button"); j.type="button"; j.className="go"; j.textContent="Join"; const go=()=>{ if(!link(inp.value)){ inp.focus(); inp.style.borderColor="var(--warn)"; } }; j.onclick=go; inp.addEventListener("keydown",e=>{ if(e.key==="Enter") go(); e.stopPropagation(); }); r.append(inp,j);
+      if(vrPage) setTimeout(()=>inp.focus(),50); } }
+  function toggle(v){ const show=v===undefined?!pop:v; if(pop){ pop.remove(); pop=null; } if(show){ pop=document.createElement("div"); pop.className="linkpop"; viewer.appendChild(pop); paint(); } }
+  btn.addEventListener("click",()=>toggle());
+  if(inClaude){ btn.hidden=true; return {link(){},unlink(){},snapshot,apply}; } // linking needs the public page
+
+  // ----- start-up: a code in the address or remembered from last time links at once; the /vr address asks for one -----
+  setTimeout(()=>{ const fromUrl=clean(qs.get("code")||location.hash); if(vrPage) showWelcome(false);
+    if(fromUrl.length===6) link(fromUrl); else if(store.get().length===6) link(store.get()); else if(vrPage) toggle(true); },300);
+  return {link,unlink,snapshot,apply,get status(){ return status; },get code(){ return code; },get peers(){ return conns.length; }};
 })();
 
 resize(); { const st=readState(); lastShape=JSON.stringify([st.L,st.W,st.H]); build(st); } setView("orbit"); tick();
