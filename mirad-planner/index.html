@@ -2068,7 +2068,7 @@ const XR=(()=>{
       fixtures.forEach(f=>f.visible=true);
       catcher.scale.set(dims.L+1,1,dims.W+1); catcher.visible=S.placed&&S.tiles===0; }
     else { fadeWalls(); catcher.visible=false; }
-    if(carry){ scene.remove(carry.box); carry=null; } S.grab=-1;
+    if(carry){ scene.remove(carry.box); carry=null; } S.grab=-1; S.press=null;
     room.updateMatrixWorld(true); S.boxes=fixtures.map(f=>({f,box:new THREE.Box3().setFromObject(f)}));
     fixtures.forEach(f=>f.traverse(c=>{ if(c.userData.tapKey) S.boxes.unshift({f,tap:c,box:new THREE.Box3().setFromObject(c).expandByScalar(0.04)}); })); // the bath tap is its own target, a little larger so it is easy to hit S.hover=[null,null]; glow.visible=false; // boxes for pointing at items with a controller
     renderer.shadowMap.needsUpdate=true; }
@@ -2081,7 +2081,7 @@ const XR=(()=>{
     xrRay.origin.copy(rays[i].position).applyMatrix4(rig.matrixWorld); xrRay.direction.set(0,0,-1).applyQuaternion(rays[i].quaternion).transformDirection(rig.matrixWorld);
     let best=null, bd=6; for(const b of S.boxes){ if(!b.f.visible||b.box.containsPoint(xrRay.origin)) continue; if(xrRay.intersectBox(b.box,hitP)){ const d=hitP.distanceTo(xrRay.origin)-(b.tap?10:0); if(d<bd){ bd=d; best={f:b.f,tap:b.tap,box:b.box,point:hitP.clone()}; } } } // a tap wins over the bath it sits on
     return best; }
-  function grab(i){ const h=S.hover[i]; if(!h||carry||S.grab>=0) return false; const s=lastState, p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p) return false;
+  function grab(i){ const h=S.hover[i]; if(!h||carry||S.grab>=0) return false; pointAt(i); const s=lastState, p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached); if(!p) return false;
     const info={uid:p.uid||p.key,key:p.key,wall:p.wall,s:p.s,out:p.out||0,w:p.w,d:p.d,free:isFree(p.key,p.prod),orig:{wall:p.wall,s:p.s,out:p.out||0}};
     const y=clamp(h.point.y,0.02,2.3), u=wallUnder({xrRay},y);
     carry={...info,obj:h.f,y,off:u&&u.wall===info.wall?clamp(u.along-info.s,0,info.w):info.w/2,moved:true};
@@ -2089,18 +2089,51 @@ const XR=(()=>{
     carry.box=new THREE.BoxHelper(h.f,0x19b5cf); scene.add(carry.box); S.grab=i; glow.visible=false; pulse(i,0.5,40);
     say(["Moving it","Slide it along the walls","Let go of the trigger to put it down"],3500); return true; }
   function letGo(i){ if(S.grab!==i||!carry) return; S.grab=-1; dropCarry(); pulse(i,0.4,30); }
-  function otherModel(i,dir){ const h=S.hover[i]; if(!h||carry) return false; let p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached);
-    if(h.tap){ const k=h.tap.userData.tapKey, e=$("prod-"+k), pr0=e&&byId(e.value); if(!pr0) return false; p={key:k,uid:k,prod:pr0}; } // the bath tap on its own
-    if(!p||!p.prod) return false;
+  function modelCtx(h){ if(!h) return null; let p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached);
+    if(h.tap){ const k=h.tap.userData.tapKey, e=$("prod-"+k), pr0=e&&byId(e.value); if(!pr0) return null; p={key:k,uid:k,prod:pr0,tapOnly:true}; } // the bath tap on its own
+    if(!p||!p.prod) return null;
     const sel=$("prod-"+p.key), all=(sel&&sel.tagName==="SELECT")?[...sel.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key), list=typeof lookGroups==="function"?lookGroups(all,p.prod).list:all; // each distinct look once, as in the carousel on the page
-    if(list.length<2){ say(["Only one model of this kind","in the catalogue so far"],3000); return true; }
-    const n=list.length, at=Math.max(0,list.findIndex(x=>x.id===p.prod.id)), pr=list[((at+dir)%n+n)%n], it=ITEMS.find(x=>x.key===p.key), uid=p.uid||p.key;
-    if(it&&it.multi){ const old=document.querySelector(`input[data-cat="${p.key}"][value="${p.prod.id}"]`), nu=document.querySelector(`input[data-cat="${p.key}"][value="${pr.id}"]`);
-      if(!nu) return true; if(old) old.checked=false; nu.checked=true;
-      if(MANUAL[uid]){ const nuid=uid.replace(p.prod.id,pr.id); if(nuid!==uid){ MANUAL[nuid]=MANUAL[uid]; delete MANUAL[uid]; } } }
-    else if(sel) sel.value=pr.id; else return true;
-    rebuild(); pulse(i,0.3,25);
-    say([pr.name,`${list.indexOf(pr)+1} of ${n} · ${eur(priceOf(pr))}`,"A / X: next model · B / Y: previous"],6000); return true; }
+    return {p,key:p.key,uid:p.uid||p.key,prod:p.prod,list,sel,it:ITEMS.find(x=>x.key===p.key)}; }
+  function setModel(c,pr){ if(!pr||pr.id===c.prod.id) return false;
+    if(c.it&&c.it.multi){ const old=document.querySelector(`input[data-cat="${c.key}"][value="${c.prod.id}"]`), nu=document.querySelector(`input[data-cat="${c.key}"][value="${pr.id}"]`);
+      if(!nu) return false; if(old) old.checked=false; nu.checked=true;
+      if(MANUAL[c.uid]){ const nuid=c.uid.replace(c.prod.id,pr.id); if(nuid!==c.uid){ MANUAL[nuid]=MANUAL[c.uid]; delete MANUAL[c.uid]; c.uid=nuid; } } }
+    else if(c.sel){ if(![...c.sel.options].some(o=>o.value===pr.id)){ const o=document.createElement("option"); o.value=pr.id; o.textContent=pr.name; c.sel.appendChild(o); } c.sel.value=pr.id; } else return false;
+    c.prod=pr; rebuild(); return true; }
+  function otherModel(i,dir){ const c=!carry&&modelCtx(S.hover[i]); if(!c) return false;
+    if(c.list.length<2){ say(["Only one model of this kind","in the catalogue so far"],3000); return true; }
+    const n=c.list.length, at=Math.max(0,c.list.findIndex(x=>x.id===c.prod.id)), pr=c.list[((at+dir)%n+n)%n];
+    if(setModel(c,pr)){ pulse(i,0.3,25); say([pr.name,`${c.list.indexOf(pr)+1} of ${n} · ${eur(priceOf(pr))}`,"A / X: next model · B / Y: previous"],6000); } return true; }
+
+  // ----- headset: the carousel of other models, like the one on the page -----
+  // A short pull of the trigger on an item opens it: the models float in an arc in front of you. Point at one and pull the trigger to put it in the room.
+  const car=new THREE.Group(); car.visible=false; rig.add(car);
+  const mkText=(w,h,pw,ph)=>{ const c=document.createElement("canvas"); c.width=w; c.height=h; const t=new THREE.CanvasTexture(c); t.encoding=THREE.sRGBEncoding; const m=new THREE.Mesh(new THREE.PlaneGeometry(pw,ph),new THREE.MeshBasicMaterial({map:t,transparent:true,depthTest:false,toneMapped:false})); m.renderOrder=31; m.userData.c=c; return m; };
+  const drawText=(m,lines)=>{ const c=m.userData.c, x=c.getContext("2d"), W=c.width, H=c.height, r=28; x.clearRect(0,0,W,H); x.fillStyle="rgba(12,22,26,.88)"; x.beginPath(); x.moveTo(r,0); x.arcTo(W,0,W,H,r); x.arcTo(W,H,0,H,r); x.arcTo(0,H,0,0,r); x.arcTo(0,0,W,0,r); x.fill();
+    x.textAlign="center"; x.textBaseline="middle"; const n=lines.length, lh=(H-24)/n; lines.forEach((t,i)=>{ x.font=`${i?500:600} ${Math.round(lh*(i?0.56:0.66))}px system-ui, sans-serif`; x.fillStyle=i?"#cfe6ec":"#fff"; x.fillText(t,W/2,12+lh*(i+0.5),W-48); }); m.material.map.needsUpdate=true; };
+  const carLabel=mkText(1024,300,0.78,0.228); car.add(carLabel);
+  const tag=mkText(1024,112,0.62,0.068); tag.visible=false; drawText(tag,["Trigger: other models  ·  Hold trigger: move"]);
+  const ring=new THREE.Mesh(new THREE.RingGeometry(0.19,0.2,48),new THREE.MeshBasicMaterial({color:0x19b5cf,depthTest:false,transparent:true,side:THREE.DoubleSide})); ring.renderOrder=30; ring.visible=false; car.add(ring);
+  const carRay=new THREE.Ray(), carInv=new THREE.Matrix4();
+  function carText(){ const k=S.car, pr=k.c.list[k.at]; drawText(carLabel,[pr.name,`${k.at+1} of ${k.c.list.length} · ${eur(priceOf(pr))}${pr.id===k.c.prod.id?" · in the room now":""}`,"Point at a model and pull the trigger to put it in the room","Stick left / right: more models  ·  B or Y: close"]); }
+  function openCar(h,i){ const c=modelCtx(h); if(!c) return;
+    if(c.list.length<2){ say(["Only one model of this kind","in the catalogue so far"],3000); return; }
+    closeCar(); const at=Math.max(0,c.list.findIndex(x=>x.id===c.prod.id)), m=S.headM.elements;
+    S.car={c,items:c.list.map(()=>null),at,shown:at,hot:-1,R:1.05,place:Object.assign({},c.p)};
+    v1.set(-m[8],0,-m[10]).normalize(); car.position.set(S.headL.x,clamp(S.headL.y-0.3,0.7,1.5),S.headL.z); car.rotation.set(0,Math.atan2(-v1.x,-v1.z),0); car.updateMatrix();
+    carLabel.position.set(0,-0.3,-S.car.R); car.visible=true; panel.visible=false; S.panelUntil=0; glow.visible=aimDot.visible=tag.visible=false; carText(); pulse(i,0.4,30); }
+  function closeCar(){ if(!S||!S.car) return; S.car.items.forEach(w=>{ if(w){ car.remove(w); disposeGroup(w); } }); S.car=null; car.visible=false; ring.visible=false; }
+  function carStep(d){ const k=S.car, n=k.c.list.length, to=clamp(k.at+d,0,n-1); if(to!==k.at){ k.at=to; carText(); } }
+  function carPick(j,i){ const k=S.car; if(j<0||j>=k.c.list.length) return; k.at=j; if(setModel(k.c,k.c.list[j])) pulse(i,0.5,40); carText(); }
+  function carFrame(dt,seen){ const k=S.car; k.shown+=(k.at-k.shown)*Math.min(1,dt*10); let built=false;
+    k.items.forEach((w,j)=>{ const off=j-k.shown, on=Math.abs(off)<3.4; if(!on){ if(w) w.visible=false; return; }
+      if(!w){ if(built) return; built=true; try{ w=k.items[j]=previewOf(k.c.list[j],k.place); }catch(e){ w=k.items[j]=new THREE.Group(); } car.add(w); } // one new model a frame keeps it smooth
+      const th=off*0.3, focus=Math.max(0,1-Math.abs(off)); w.visible=true; w.position.set(Math.sin(th)*k.R,0,-Math.cos(th)*k.R); w.rotation.set(0,-th+0.45,0); w.scale.setScalar((0.23+0.1*focus)*(j===k.hot?1.15:1)); });
+    carInv.copy(car.matrix).invert(); let hot=-1, best=0.2*0.2;
+    for(let i=1;i>=0;i--){ if(!seen[i]) continue; carRay.origin.copy(rays[i].position); carRay.direction.set(0,0,-1).applyQuaternion(rays[i].quaternion); carRay.applyMatrix4(carInv);
+      k.items.forEach((w,j)=>{ if(!w||!w.visible) return; if(v1.copy(w.position).sub(carRay.origin).dot(carRay.direction)<0) return; const d=carRay.distanceSqToPoint(w.position); if(d<best||(d<0.2*0.2&&i===S.lastHand&&hot<0)){ if(d<best) best=d; hot=j; } }); }
+    k.hot=hot; ring.visible=hot>=0&&!!k.items[hot]; if(ring.visible){ const w=k.items[hot]; ring.position.copy(w.position); ring.rotation.set(0,Math.atan2(-w.position.x,-w.position.z),0); } }
+
   function pulse(i,v,ms){ try{ for(const src of S.session.inputSources){ if((src.handedness==="left"?0:1)===i&&src.gamepad&&src.gamepad.hapticActuators&&src.gamepad.hapticActuators[0]) src.gamepad.hapticActuators[0].pulse(v,ms); } }catch(e){} }
 
   function bestWall(len){ const d=wallDefs(dims.L,dims.W); return WALL_ORDER.reduce((a,k)=>Math.abs(d[k].len-len)<Math.abs(d[a].len-len)-0.005?k:a,"north"); }
@@ -2115,7 +2148,7 @@ const XR=(()=>{
     v1.set(rx,0,rz).applyAxisAngle(UP,rig.rotation.y); rig.position.x-=v1.x; rig.position.z-=v1.z; }
   function placedHelp(){ const cm=Math.round(S.p1.distanceTo(S.p2)*100), w=wallDefs(dims.L,dims.W)[S.wall], wcm=Math.round(w.len*100), off=Math.abs(cm-wcm)>8?` You measured ${cm} cm; this wall is ${wcm} cm in the plan.`:"";
     if(S.handheld) say(`Placed at true size.${off} Drag to slide it, twist with two fingers to turn it. "Next wall" if it sits the wrong way round.`);
-    else say(["Placed at true size",off.trim()||"Walk around and look","Left stick slides it · right stick turns it","Grip: next wall · other grip: other side","A / X: tiles · B / Y: start again","Point at an item: trigger moves it, A / B swaps it"].filter(Boolean),14000); }
+    else say(["Placed at true size",off.trim()||"Walk around and look","Left stick slides it · right stick turns it","Grip: next wall · other grip: other side","A / X: tiles · B / Y: start again","Point at an item: trigger shows other models, hold moves it"].filter(Boolean),14000); }
   function startPlacing(){ S.placed=false; S.p1=S.p2=null; pin.visible=span.visible=false; rig.position.set(0,0,0); rig.rotation.set(0,0,0); rig.updateMatrixWorld(true);
     btnsEl.querySelectorAll("[data-x=wall],[data-x=flip],[data-x=tiles],[data-x=again]").forEach(b=>b.hidden=true);
     applyVis();
@@ -2149,6 +2182,9 @@ const XR=(()=>{
   ["pointerup","pointercancel"].forEach(t=>ui.addEventListener(t,e=>{ touches.delete(e.pointerId); twist=null; }));
 
   function sticks(src,st,dt){ const gp=src.gamepad; if(!gp) return; const ax=gp.axes, x=ax.length>=4?ax[2]:ax[0]||0, y=ax.length>=4?ax[3]:ax[1]||0, left=src.handedness==="left";
+    if(S.car){ const bt=j=>!!(gp.buttons[j]&&gp.buttons[j].pressed), t=performance.now(), dir=x>0.55?1:x<-0.55?-1:0; // while the carousel is open the sticks browse it
+      if(!dir) st.carT=0; else if(!st.carT){ st.carT=t+450; carStep(dir); } else if(t>st.carT){ st.carT=t+200; carStep(dir); }
+      const pa=bt(4), pb=bt(5); if(pa&&!st.a&&S.car) carPick(S.car.at,left?0:1); if(pb&&!st.b) closeCar(); st.a=pa; st.b=pb; return; }
     const dz=v=>Math.abs(v)<0.18?0:v, sx=dz(x), sy=dz(y), m=S.headM.elements;
     v1.set(m[0],0,m[2]).normalize(); v2.set(-m[8],0,-m[10]).normalize(); // head right and head forward on the floor, in real-room coordinates
     if(S.mode==="vr"){
@@ -2186,11 +2222,13 @@ const XR=(()=>{
         sticks(src,st,dt); }
       rays.forEach((r,i)=>r.visible=seen[i]&&!S.handheld);
       // pointing at items, and carrying one
-      if(S.placed&&!S.handheld&&S.boxes){ let shown=null;
+      if(S.car){ S.hover=[null,null]; glow.visible=aimDot.visible=tag.visible=false; carFrame(dt,seen); }
+      else if(S.placed&&!S.handheld&&S.boxes){ let shown=null;
+        if(S.press&&!carry){ const pr=S.press; pointAt(pr.i); if(performance.now()-pr.t>280||xrRay.direction.angleTo(pr.dir)>0.07){ S.press=null; S.hover[pr.i]=pr.h; grab(pr.i); } } // held or dragged: move it
         for(let i=1;i>=0;i--){ S.hover[i]=seen[i]&&!carry?pointAt(i):null; if(S.hover[i]&&(!shown||S.lastHand===i)) shown=S.hover[i]; }
         if(carry&&S.grab>=0){ if(seen[S.grab]){ pointAt(S.grab); moveCarry({xrRay}); } shown=null; }
-        glow.visible=!!shown; aimDot.visible=!!shown; if(shown){ glow.box.copy(shown.box); aimDot.position.copy(shown.point); }
-      } else { glow.visible=aimDot.visible=false; }
+        glow.visible=!!shown; aimDot.visible=!!shown; tag.visible=!!shown; if(shown){ glow.box.copy(shown.box); aimDot.position.copy(shown.point); shown.box.getCenter(v1); tag.position.set(v1.x,Math.min(shown.box.max.y+0.09,2.25),v1.z); tag.rotation.set(0,Math.atan2(S.headW.x-v1.x,S.headW.z-v1.z),0); tag.scale.setScalar(clamp(S.headW.distanceTo(v1)*0.6,0.7,2.4)); } // the hint grows with distance so it stays readable
+      } else { glow.visible=aimDot.visible=tag.visible=false; }
       // where the floor is being pointed at
       if(S.mode==="ar"&&!S.placed){ S.hit=null;
         if(S.hitSrc){ const hr=xf.getHitTestResults(S.hitSrc); if(hr.length){ const hp=hr[0].getPose(ref); if(hp){ const q=hp.transform.position; S.hit=new THREE.Vector3(q.x,q.y,q.z); } } }
@@ -2209,30 +2247,34 @@ const XR=(()=>{
 
   async function begin(mode,session){
     const prev={view,bg:scene.background,winShadow:winLight.castShadow};
-    S={mode,session,prev,handheld:!!session.domOverlayState||(isPhone&&mode==="ar"),placed:mode==="vr",tiles:0,pads:[{},{}],head:false,headM:new THREE.Matrix4(),headL:new THREE.Vector3(),headW:new THREE.Vector3(),needStart:mode==="vr",panelUntil:0,room:null,boxes:null,hover:[null,null],grab:-1,lastHand:1,hit:null,hitSrc:null,wantHit:false,lastSrc:null};
+    S={mode,session,prev,handheld:!!session.domOverlayState||(isPhone&&mode==="ar"),placed:mode==="vr",tiles:0,pads:[{},{}],head:false,headM:new THREE.Matrix4(),headL:new THREE.Vector3(),headW:new THREE.Vector3(),needStart:mode==="vr",panelUntil:0,room:null,boxes:null,hover:[null,null],grab:-1,press:null,car:null,lastHand:1,hit:null,hitSrc:null,wantHit:false,lastSrc:null};
     if(swapper) closeSwapper();
     setView("walk"); orbit.enabled=false; $("pad").hidden=true;
-    rig.position.set(0,0,0); rig.rotation.set(0,0,0); scene.add(rig); scene.add(catcher); scene.add(glow); scene.add(aimDot); rig.add(camera);
+    rig.position.set(0,0,0); rig.rotation.set(0,0,0); scene.add(rig); scene.add(catcher); scene.add(glow); scene.add(aimDot); scene.add(tag); rig.add(camera);
     if(mode==="ar"){ scene.background=null; renderer.setClearColor(0x000000,0); }
     if(isHeadset) winLight.castShadow=false; // one shadow light is plenty for a headset's chip
     renderer.xr.enabled=true; renderer.xr.setReferenceSpaceType("local-floor");
     session.addEventListener("end",finish);
     session.addEventListener("select",e=>{ if(!S) return; S.lastSrc=e.inputSource; tapFloor(); });
-    session.addEventListener("selectstart",e=>{ if(!S||!S.placed||S.handheld) return; const i=e.inputSource.handedness==="left"?0:1; S.lastHand=i; grab(i); });
-    session.addEventListener("selectend",e=>{ if(!S) return; letGo(e.inputSource.handedness==="left"?0:1); });
+    session.addEventListener("selectstart",e=>{ if(!S||!S.placed||S.handheld) return; const i=e.inputSource.handedness==="left"?0:1; S.lastHand=i;
+      if(S.car){ if(S.car.hot>=0) carPick(S.car.hot,i); else closeCar(); return; }
+      if(S.hover[i]&&!carry){ pointAt(i); S.press={i,t:performance.now(),dir:xrRay.direction.clone(),h:S.hover[i]}; } });
+    session.addEventListener("selectend",e=>{ if(!S) return; const i=e.inputSource.handedness==="left"?0:1;
+      if(S.press&&S.press.i===i){ const h=S.press.h; S.press=null; openCar(h,i); return; } // a short pull: show the other models
+      letGo(i); });
     session.addEventListener("squeeze",e=>{ if(!S||S.mode!=="ar") return; (e.inputSource.handedness==="left"?act.flip:act.wall)(); });
     try{ await renderer.xr.setSession(session); }catch(e){ try{ session.end(); }catch(_){ } finish(); note("AR / VR could not start on this device."); return; }
     try{ const layer=session.renderState.baseLayer; if(layer&&"fixedFoveation" in layer) layer.fixedFoveation=1; }catch(e){}
     if(mode==="ar"&&session.requestHitTestSource&&S.handheld){ S.wantHit=true;
       session.requestReferenceSpace("viewer").then(vs=>session.requestHitTestSource({space:vs})).then(h=>{ if(S) S.hitSrc=h; }).catch(()=>{ if(S) S.wantHit=false; }); }
     if(S.handheld) ui.classList.add("on");
-    if(mode==="ar") startPlacing(); else { applyVis(); say(["You are standing in the bathroom","Left stick: walk · right stick: turn","Point at an item and hold the trigger to move it","Point at an item and press A or B for other models","Meta button: leave"],16000); }
+    if(mode==="ar") startPlacing(); else { applyVis(); say(["You are standing in the bathroom","Left stick: walk · right stick: turn","Point at an item: pull the trigger for other models","Hold the trigger on an item to move it","Meta button: leave"],16000); }
     renderer.setAnimationLoop(frame);
   }
-  function finish(){ if(!S) return; const prev=S.prev; S=null;
+  function finish(){ if(!S) return; closeCar(); const prev=S.prev; S=null;
     renderer.setAnimationLoop(null); renderer.xr.enabled=false;
     ui.classList.remove("on"); touches.clear();
-    [reticle,pin,span,panel,...rays].forEach(o=>o.visible=false); catcher.visible=false; glow.visible=aimDot.visible=false; scene.remove(glow); scene.remove(aimDot);
+    [reticle,pin,span,panel,...rays].forEach(o=>o.visible=false); catcher.visible=false; glow.visible=aimDot.visible=false; scene.remove(glow); scene.remove(aimDot); scene.remove(tag); tag.visible=false; car.visible=false;
     if(carry){ scene.remove(carry.box); carry=null; }
     scene.remove(catcher); rig.remove(camera); scene.remove(rig); camera.position.set(0,1.6,0); camera.quaternion.set(0,0,0,1); camera.scale.set(1,1,1); camera.updateMatrixWorld(true);
     scene.background=prev.bg; setSceneBg(); winLight.castShadow=prev.winShadow;
@@ -2296,7 +2338,7 @@ const XR=(()=>{
     else button("?",()=>note(tip?"":HELP,true)).setAttribute("aria-label","How AR and VR work");
   }
   setup();
-  return {get state(){ return S; },bar,rig,start,makeUsdz,act,tapFloor};
+  return {get state(){ return S; },bar,rig,car,start,makeUsdz,act,tapFloor};
 })();
 
 // ---------- Linked devices: the same bathroom live on a tablet and in the headset ----------
