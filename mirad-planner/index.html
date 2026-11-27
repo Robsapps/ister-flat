@@ -2025,7 +2025,7 @@ const XR=(()=>{
   function otherModel(i,dir){ const h=S.hover[i]; if(!h||carry) return false; let p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached);
     if(h.tap){ const k=h.tap.userData.tapKey, e=$("prod-"+k), pr0=e&&byId(e.value); if(!pr0) return false; p={key:k,uid:k,prod:pr0}; } // the bath tap on its own
     if(!p||!p.prod) return false;
-    const sel=$("prod-"+p.key), list=(sel&&sel.tagName==="SELECT")?[...sel.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key);
+    const sel=$("prod-"+p.key), all=(sel&&sel.tagName==="SELECT")?[...sel.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key), list=typeof lookGroups==="function"?lookGroups(all,p.prod).list:all; // each distinct look once, as in the carousel on the page
     if(list.length<2){ say(["Only one model of this kind","in the catalogue so far"],3000); return true; }
     const n=list.length, at=Math.max(0,list.findIndex(x=>x.id===p.prod.id)), pr=list[((at+dir)%n+n)%n], it=ITEMS.find(x=>x.key===p.key), uid=p.uid||p.key;
     if(it&&it.multi){ const old=document.querySelector(`input[data-cat="${p.key}"][value="${p.prod.id}"]`), nu=document.querySelector(`input[data-cat="${p.key}"][value="${pr.id}"]`);

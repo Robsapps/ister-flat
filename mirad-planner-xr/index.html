@@ -1658,25 +1658,36 @@ const swShade=(()=>{ const c=document.createElement("canvas"); c.width=256; c.he
   gr.addColorStop(0,"rgba(38,46,52,0)"); gr.addColorStop(0.45,"rgba(38,46,52,0.2)"); gr.addColorStop(1,"rgba(38,46,52,0.34)"); x.fillStyle=gr; x.fillRect(0,0,256,2);
   const t=new THREE.CanvasTexture(c); const m=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.MeshBasicMaterial({map:t,transparent:true,depthWrite:false,toneMapped:false}));
   m.renderOrder=-1; swScene.add(m); return m; })(); // soft dark band behind the column so white models stand out
+// products of the catalogue without their own 3D model share one generic look per kind; the carousel shows each look once,
+// models with their own look first. The left panel still lists every product.
+const LOOK_SKIP=new Set(["id","cat","name","price","url","brand","thumb","est","w","d","h","parts","glass","y0"]);
+function lookKey(p){ if(!p.id.startsWith("cat-")||MODEL_GEO[p.id]) return "own:"+p.id;
+  return p.cat+"|"+(p.cat==="bathtap"?tapStyle(p):"")+"|"+Object.keys(p).filter(k=>!LOOK_SKIP.has(k)).sort().map(k=>k+"="+p[k]).join(","); }
+function lookGroups(all,cur){ const own=[], gen=new Map();
+  all.forEach(p=>{ const k=lookKey(p); if(k.startsWith("own:")) own.push(p); else { if(!gen.has(k)) gen.set(k,[]); gen.get(k).push(p); } });
+  const list=[...own], groups=own.map(()=>1);
+  gen.forEach(ms=>{ list.push(cur&&ms.includes(cur)?cur:ms[0]); groups.push(ms.length); });
+  return {list,groups}; }
 function openSwapper(obj,tap){
   let p;
   if(tap){ const k=tap.userData.tapKey, pr=byId($("prod-"+k).value); if(!pr) return; p={key:k,uid:k,prod:pr,tapOnly:true}; obj=tap; } // the bath tap on its own
   else p=lastPlaced.find(q=>(q.uid||q.key)===obj.userData.uid&&!q.attached); if(!p||!p.prod) return;
-  const selEl=$("prod-"+p.key), list=(selEl&&selEl.tagName==="SELECT")?[...selEl.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key); if(list.length<2){ $("hint").textContent="There is only one model of this kind in the catalogue so far."; return; }
+  const selEl=$("prod-"+p.key), all=(selEl&&selEl.tagName==="SELECT")?[...selEl.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key); const {list,groups}=lookGroups(all,p.prod); if(list.length<2){ $("hint").textContent="There is only one model of this kind in the catalogue so far."; return; }
   const bb=new THREE.Box3().setFromObject(obj), c=new THREE.Vector3(); bb.getCenter(c);
   const toCam=camera.position.clone().sub(c); toCam.y=0; const dist=toCam.length(); toCam.normalize();
   const anchor=c.clone().add(toCam.clone().multiplyScalar(Math.min(0.7,dist*0.3))); const S=clamp(dist*0.15,0.3,1.0); anchor.y=Math.max(bb.max.y+S*0.55,0.6);
   const group=new THREE.Group(); swScene.add(group); swScene.environment=scene.environment;
   const items=list.map(()=>null); // models are built only when they come near the front, so hundreds of choices stay fast
   const idx=Math.max(0,list.findIndex(x=>x.id===p.prod.id));
-  swapper={S,place:p,uid:p.uid||p.key,key:p.key,list,items,group,anchor,idx,shown:idx,target:idx,cur:p.prod.id,drag:null,box:new THREE.BoxHelper(obj,0x0f7a8a)};
+  swapper={groups,place:p,uid:p.uid||p.key,key:p.key,list,items,group,anchor,idx,shown:idx,target:idx,cur:p.prod.id,drag:null,box:new THREE.BoxHelper(obj,0x0f7a8a)};
   scene.add(swapper.box);
   orbit.enabled=false; drag=null;
   $("swapbar").hidden=false; $("hint").hidden=true; swapLabel();
 }
 function swapLabel(){ const sw=swapper; if(!sw) return; const pr=sw.list[clamp(Math.round(sw.target),0,sw.list.length-1)];
   const nm=$("swapName"); nm.textContent=""; const b=document.createElement("b"); b.textContent=pr.name; const sp=document.createElement("span");
-  sp.textContent=`${Math.round(sw.target)+1} of ${sw.list.length} · ${priceOf(pr).toLocaleString("sk-SK",{style:"currency",currency:"EUR"})}`; nm.append(b,sp);
+  const n=sw.groups[clamp(Math.round(sw.target),0,sw.list.length-1)]||1;
+  sp.textContent=`${Math.round(sw.target)+1} of ${sw.list.length} · ${priceOf(pr).toLocaleString("sk-SK",{style:"currency",currency:"EUR"})}`+(n>1?` · shown for ${n} similar products, pick the exact one on the left`:""); nm.append(b,sp);
   $("swapPrev").disabled=sw.target<=0; $("swapNext").disabled=sw.target>=sw.list.length-1; }
 function updateSwapper(dt){
   const sw=swapper; sw.shown+=(sw.target-sw.shown)*Math.min(1,dt*12); sw.t=(sw.t||0)+dt;
@@ -2014,7 +2025,7 @@ const XR=(()=>{
   function otherModel(i,dir){ const h=S.hover[i]; if(!h||carry) return false; let p=lastPlaced.find(q=>(q.uid||q.key)===h.f.userData.uid&&!q.attached);
     if(h.tap){ const k=h.tap.userData.tapKey, e=$("prod-"+k), pr0=e&&byId(e.value); if(!pr0) return false; p={key:k,uid:k,prod:pr0}; } // the bath tap on its own
     if(!p||!p.prod) return false;
-    const sel=$("prod-"+p.key), list=(sel&&sel.tagName==="SELECT")?[...sel.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key);
+    const sel=$("prod-"+p.key), all=(sel&&sel.tagName==="SELECT")?[...sel.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key), list=typeof lookGroups==="function"?lookGroups(all,p.prod).list:all; // each distinct look once, as in the carousel on the page
     if(list.length<2){ say(["Only one model of this kind","in the catalogue so far"],3000); return true; }
     const n=list.length, at=Math.max(0,list.findIndex(x=>x.id===p.prod.id)), pr=list[((at+dir)%n+n)%n], it=ITEMS.find(x=>x.key===p.key), uid=p.uid||p.key;
     if(it&&it.multi){ const old=document.querySelector(`input[data-cat="${p.key}"][value="${p.prod.id}"]`), nu=document.querySelector(`input[data-cat="${p.key}"][value="${pr.id}"]`);
