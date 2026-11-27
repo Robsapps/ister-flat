@@ -280,7 +280,7 @@ input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid 
     </div>
     <div class="photos"><button type="button" class="photo" id="photoBtn">Save photo</button><button type="button" class="photo hd" id="hdBtn" title="Five high-resolution pictures from several angles, in one zip file">HD photos</button></div>
     <div class="hint" id="hint"></div>
-    <div class="swapbar" id="swapbar" hidden role="group" aria-label="Other models"><button type="button" id="swapPrev" aria-label="Previous model">◀</button><div class="nm" id="swapName" aria-live="polite"></div><button type="button" id="swapNext" aria-label="Next model">▶</button><button type="button" class="done" id="swapDone">Done</button></div>
+    <div class="swapbar" id="swapbar" hidden role="group" aria-label="Other models"><button type="button" id="swapPrev" aria-label="Previous model">▲</button><div class="nm" id="swapName" aria-live="polite"></div><button type="button" id="swapNext" aria-label="Next model">▼</button><button type="button" class="done" id="swapDone">Done</button></div>
     <div class="pad" id="pad" hidden>
       <button type="button" class="fw" data-move="f" aria-label="Walk forward">▲</button>
       <button type="button" class="lf" data-move="l" aria-label="Step left">◀</button>
@@ -390,13 +390,13 @@ PRODUCTS.push(.../*EXTRA*/[{"id":"cat-jika-zeta-wc-misa-sp","cat":"wc","name":"J
 // categories: placement rules (front = free space needed in front, in cm)
 const ITEMS = [
   {key:"tub",      label:"Bathtub",        front:50, corner:true},
+  {key:"bathtap",  label:"Bath tap",       attached:"tub"},
+  {key:"tubscreen",label:"Bath screen",    attached:"tub"},
   {key:"shower",   label:"Shower",         front:50, corner:true},
   {key:"vanity",   label:"Washbasin",      front:60, highOnWall:true},
   {key:"mirror",   label:"Mirror",         attached:"vanity"},
   {key:"basintap", label:"Basin tap",      attached:"vanity"},
   {key:"underbasin",label:"Cabinet under basin", attached:"vanity"},
-  {key:"bathtap",  label:"Bath tap",       attached:"tub"},
-  {key:"tubscreen",label:"Bath screen",    attached:"tub"},
   {key:"showerset",label:"Shower set",     attached:"shower"},
   {key:"soap",     label:"Soap dispenser", attached:"vanity"},
   {key:"paper",    label:"Toilet roll holder", attached:"wc"},
@@ -1079,7 +1079,7 @@ function buildBasin(g,pr,w,d){
 }
 
 // ---------- detailed bathtubs ----------
-function buildTub(g,pr,w,d,sPos){
+function buildTub(g,pr,w,d,sPos,out=0){
   const N=120, kind=pr.kind, W=pr.w/100, D=pr.d/100;
   const free=kind==="freestanding", rimY=kind==="builtin"||kind==="corner"?0.56:(pr.h||55)/100;
   const ox=(w-W)/2, oz=free?(d-D)/2+0.02:0; // centre a freestanding bath in its footprint
@@ -1128,17 +1128,49 @@ function buildTub(g,pr,w,d,sPos){
       box(g,MAT.chrome,0.015,0.25,0.02,x0+dir*(L*0.47),y0+0.85,fz+0.02); }
   }
   const bt=CUR_TAPS.bath;
-  if(bt){ const tx=kind==="corner"?(sPos===0?0.3:w-0.3):ox+W/2, ty=rimY+0.2, m=tapMat(bt.finish);
-    if(bt.style==="exposed") exposedBathMixer(g,tx,ty,m); else wallSpout(g,tx,ty,0.2+oz,m,true); }
-  else if(free){ const tx=ox-0.11, tz=cz;
-    cyl(g,MAT.chrome,0.022,0.022,0.92,tx,0.46,tz); const sp=cyl(g,MAT.chrome,0.012,0.012,0.2,tx+0.08,0.9,tz); sp.rotation.z=Math.PI/2; cyl(g,MAT.chrome,0.05,0.05,0.01,tx,0.005,tz); }
-  else { const tx=kind==="corner"?(sPos===0?0.04:w-0.04):ox+W/2, tz=kind==="corner"?0.55:0.02;
-    if(kind==="corner"){ box(g,MAT.chrome,0.04,0.05,0.14,tx,rimY+0.15,tz); } else { box(g,MAT.chrome,0.14,0.05,0.04,tx,rimY+0.16,0.02); box(g,MAT.chrome,0.03,0.03,0.16,tx,rimY+0.14,0.1); } }
+  if(bt){ const tg=new THREE.Group(); tg.userData.tapKey="bathtap"; g.add(tg);
+    if(free){ const st=tapStyle(bt); // floor column beside it; a wall tap on the wall behind when the bath is close to it, else on the rim
+      if(st==="floor") bathTapModel(tg,bt,{x:ox-0.13,y:0,z:cz,dx:1,dz:0});
+      else if(st!=="deck"&&out<0.45) bathTapModel(tg,bt,{x:cx,y:rimY,z:-out,dx:0,dz:1});
+      else bathTapModel(tg,bt,{x:ox+0.1,y:rimY,z:cz,dx:1,dz:0,rim:true}); }
+    else if(kind==="corner") bathTapModel(tg,bt,{x:sPos===0?0.3:w-0.3,y:rimY,z:0,dx:0,dz:1});
+    else bathTapModel(tg,bt,{x:ox+W/2,y:rimY,z:0,dx:0,dz:1});
+    tg.updateMatrixWorld(true); const hb=new THREE.Box3().setFromObject(tg), hs=new THREE.Vector3(), hc=new THREE.Vector3(); hb.getSize(hs); hb.getCenter(hc);
+    const grip=new THREE.Mesh(new THREE.BoxGeometry(hs.x+0.08,hs.y+0.08,hs.z+0.08),MAT.chrome); grip.position.copy(hc); grip.visible=false; tg.add(grip); } // easier to grab: an invisible box around the tap
+}
+// bath taps: the shape follows the product (wall, concealed, thermostat, on the rim, floor-standing) so swapping shows a real difference
+function tapStyle(p){ const n=norm(p.name||"");
+  if(p.style==="floor"||/stojan|podlah|volne stoj|freestand|floor/.test(n)) return "floor";
+  if(p.style==="deck"||/otvor|na okraj|deck|rim/.test(n)) return "deck";
+  if(/termost|thermost/.test(n)) return "thermo";
+  if(p.style==="wall"||/podomiet|podomit|concealed|built-in/.test(n)) return "concealed";
+  return "exposed"; }
+function bathTapModel(g0,bt,o){ let g=g0; // o: x,y (rim height),z (wall side), dx/dz: direction into the bath; rim: tub-mounted on a freestanding bath
+  const m=tapMat(bt.finish); let st=tapStyle(bt);
+  if(st==="floor"&&!(o.y===0)) st="deck";
+  if(o.rim&&st!=="floor") st="deck";
+  const {x,z,dx,dz}=o, px=dz, pz=dx; // perpendicular to the spout direction
+  const wallG=()=>{ const h=new THREE.Group(); h.position.z=z; g.add(h); return h; }; // wall taps are drawn from the wall surface at z
+  if(st==="exposed") exposedBathMixer(wallG(),x,o.y+0.2,m);
+  else if(st==="concealed") wallSpout(wallG(),x,o.y+0.2,0.2,m,true);
+  else if(st==="thermo"){ const y=o.y+0.2; g=wallG();
+    [-0.075,0.075].forEach(d=>{ const c=cyl(g,m,0.012,0.012,0.05,x+d,y,0.025); c.rotation.x=Math.PI/2; });
+    const b=cyl(g,m,0.03,0.03,0.24,x,y,0.06); b.rotation.z=Math.PI/2;
+    [-0.135,0.135].forEach(d=>{ const k=cyl(g,m,0.034,0.034,0.04,x+d,y,0.06); k.rotation.z=Math.PI/2; });
+    tube(g,m,[[x,y-0.025,0.06],[x,y-0.06,0.07],[x,y-0.07,0.15],[x,y-0.075,0.25]],0.012); }
+  else if(st==="deck"){ const y=o.y, zz=z+dz*0.06, xx=x+dx*0.0;
+    cyl(g,m,0.026,0.03,0.03,xx,y+0.015,zz);
+    tube(g,m,[[xx,y+0.02,zz],[xx,y+0.2,zz],[xx+dx*0.06,y+0.25,zz+dz*0.06],[xx+dx*0.13,y+0.2,zz+dz*0.13],[xx+dx*0.15,y+0.15,zz+dz*0.15]],0.012);
+    [-1,1].forEach(sn=>{ const hx=xx+px*0.1*sn, hz=zz+pz*0.1*sn; cyl(g,m,0.02,0.022,0.05,hx,y+0.025,hz); box(g,m,0.014,0.01,0.06,hx,y+0.06,hz); }); }
+  else { // floor-standing column beside a freestanding bath, with a hand shower
+    cyl(g,m,0.05,0.05,0.01,x,0.005,z); cyl(g,m,0.022,0.022,0.95,x,0.48,z);
+    tube(g,m,[[x,0.93,z],[x+dx*0.04,1.0,z+dz*0.04],[x+dx*0.15,1.0,z+dz*0.15],[x+dx*0.2,0.95,z+dz*0.2]],0.012);
+    box(g,m,0.03,0.07,0.03,x,0.85,z); cyl(g,m,0.016,0.02,0.18,x-px*0.045,0.8,z-pz*0.045); }
 }
 function makeFixture(p,s){
   const g=new THREE.Group(), w=p.w/100, d=p.d/100, pr=p.prod||{};
   if(p.key==="tub"){
-    buildTub(g,pr,w,d,p.s);
+    buildTub(g,pr,w,d,p.s,(p.out||0)/100);
   } else if(p.key==="shower"){
     const frame=pr.frame==="black"?TAP_MAT.black:pr.frame==="white"?MAT.white:MAT.chrome, left=p.s===0;
     if(pr.type==="walkin"){ // tiled floor with a long drain and one fixed glass panel on a wall bracket
@@ -1372,7 +1404,7 @@ const yawPitch={yaw:0,pitch:0};
 const walkPos=new THREE.Vector3();
 const hints={
   top:"Plan view from above. Drag to move, pinch or scroll to zoom. Press and hold an item: slide to move it, or let go to see other models.",
-  orbit:"Drag to turn the room, pinch or scroll to zoom. Press and hold an item, the door or the window: slide it along the walls to move it, or let go to see other models above it.",
+  orbit:"Drag to turn the room, pinch or scroll to zoom. Press and hold an item, the door or the window: slide it along the walls to move it, or let go to see other models on the right.",
   walk:"Drag to look around. Use the arrows or W A S D to walk. Press and hold an item: slide to move it, or let go to see other models."
 };
 function aspect(){ return Math.max(0.3,viewer.clientWidth/Math.max(1,viewer.clientHeight)); }
@@ -1425,7 +1457,7 @@ function aimRay(e){ if(e.xrRay){ ray.ray.copy(e.xrRay); return; } const r=render
 function pickTarget(e){
   aimRay(e);
   const hits=ray.intersectObjects([...fixtures.filter(f=>f.visible),...doorParts,...winParts],true);
-  for(const h of hits){ let o=h.object; while(o&&!(o.userData.key&&fixtures.includes(o))&&!o.userData.door&&!o.userData.win) o=o.parent; if(o) return {obj:o,point:h.point.clone()}; }
+  for(const h of hits){ let o=h.object, tap=null; while(o&&!(o.userData.key&&fixtures.includes(o))&&!o.userData.door&&!o.userData.win){ if(!tap&&o.userData.tapKey) tap=o; o=o.parent; } if(o) return {obj:o,point:h.point.clone(),tap}; }
   return null;
 }
 function wallUnder(e,y){ // nearest wall and position along it (cm) under the pointer, at the height the item was grabbed
@@ -1444,7 +1476,7 @@ function startCarry(){
   else if(t.obj.userData.win){ if(!s.win){ hold=null; return; } info={door:true,win:true,wall:s.win.wall,s:s.win.offset,w:s.win.width}; }
   else { const p=lastPlaced.find(q=>(q.uid||q.key)===t.obj.userData.uid&&!q.attached); if(!p){ hold=null; return; } info={uid:p.uid||p.key,key:p.key,wall:p.wall,s:p.s,out:p.out||0,w:p.w,d:p.d,free:isFree(p.key,p.prod),orig:{wall:p.wall,s:p.s,out:p.out||0}}; }
   const y=clamp(t.point.y,0.02,2.3), u=wallUnder(hold.e,y);
-  carry={...info,obj:t.obj,y,off:u&&u.wall===info.wall?clamp(u.along-info.s,0,info.w):info.w/2,sx:hold.x,sy:hold.y,moved:false};
+  carry={...info,obj:t.obj,tap:t.tap,y,off:u&&u.wall===info.wall?clamp(u.along-info.s,0,info.w):info.w/2,sx:hold.x,sy:hold.y,moved:false};
   if(carry.free&&u){ const a=alongOn(carry.wall,u); carry.off=clamp(a.along-info.s,0,info.w); carry.offD=clamp(a.dist-info.out,0,info.d); }
   orbit.enabled=false; drag=null;
   carry.box=new THREE.BoxHelper(t.obj,0x0f7a8a); scene.add(carry.box);
@@ -1503,7 +1535,7 @@ window.addEventListener("pointermove",e=>{
 },{passive:false});
 ["pointerup","pointercancel"].forEach(t=>window.addEventListener(t,()=>{ // capture phase: runs before the orbit controls let go
   if(hold&&hold.timer) clearTimeout(hold.timer); hold=null;
-  if(carry){ if(carry.moved) dropCarry(); else { const c=carry; carry=null; scene.remove(c.box); renderer.domElement.style.cursor=""; orbit.enabled=view!=="walk"; $("hint").textContent=hints[view]; if(!c.door) openSwapper(c.obj); } }
+  if(carry){ if(carry.moved) dropCarry(); else { const c=carry; carry=null; scene.remove(c.box); renderer.domElement.style.cursor=""; orbit.enabled=view!=="walk"; $("hint").textContent=hints[view]; if(!c.door) openSwapper(c.obj,c.tap); } }
 },true));
 // walk: move with keys and pad
 const move={f:0,b:0,l:0,r:0};
@@ -1547,7 +1579,9 @@ function tick(){
   if(fadeWalls()) reshadow=true; if(swapper){ updateSwapper(dt); invalidate(); }
   if(redraw>0||!camera.matrixWorld.equals(lastCam)||!camera.projectionMatrix.equals(lastProj)){
     if(reshadow){ renderer.shadowMap.needsUpdate=true; reshadow=false; }
-    renderer.render(scene,camera); lastCam.copy(camera.matrixWorld); lastProj.copy(camera.projectionMatrix); if(redraw>0) redraw--;
+    renderer.render(scene,camera);
+    if(swapper){ const ac=renderer.autoClear; renderer.autoClear=false; renderer.clearDepth(); renderer.render(swScene,camera); renderer.autoClear=ac; }
+    lastCam.copy(camera.matrixWorld); lastProj.copy(camera.projectionMatrix); if(redraw>0) redraw--;
   }
   requestAnimationFrame(tick);
 }
@@ -1605,25 +1639,34 @@ $("photoBtn").addEventListener("click",async()=>{
   }catch(e){ btn.textContent=e&&e.code==="declined"?"Not saved":"Couldn't save"; }
   setTimeout(()=>{ btn.textContent="Save photo"; btn.disabled=false; },2200);
 });
-// ---------- swap carousel: press and hold an item, let go, and the other models of that kind float above it in an arch.
+// ---------- swap carousel: press and hold an item, let go, and the other models of that kind line up on the right of the screen.
 // Slide left or right to scroll through them; when it settles, the one in the middle goes into the room straight away.
 let swapper=null;
 function previewOf(prod,p){
   const keepDecor=CUR_DECOR, keepPlant=PLANT_DONE; CUR_DECOR=false; PLANT_DONE=true;
-  let inner; try{ inner=makeFixture(Object.assign({},p,{prod,w:prod.w||p.w,d:prod.d||p.d,uid:"preview"}),lastState); } finally { CUR_DECOR=keepDecor; PLANT_DONE=keepPlant; }
+  let inner; try{ if(p.tapOnly){ inner=new THREE.Group(); bathTapModel(inner,prod,{x:0,y:tapStyle(prod)==="floor"?0:0.6,z:0,dx:0,dz:1}); } else inner=makeFixture(Object.assign({},p,{prod,w:prod.w||p.w,d:prod.d||p.d,uid:"preview"}),lastState); } finally { CUR_DECOR=keepDecor; PLANT_DONE=keepPlant; }
   inner.position.set(0,0,0); inner.rotation.set(0,0,0);
   inner.traverse(o=>{ const ms=o.material?(Array.isArray(o.material)?o.material:[o.material]):[]; ms.forEach(m=>{ if(m.userData.lin) return; m.userData.lin=true; if(m.color) m.color.convertSRGBToLinear(); if(m.emissive) m.emissive.convertSRGBToLinear(); }); o.castShadow=false; });
   const bb=new THREE.Box3().setFromObject(inner), sz=new THREE.Vector3(), c=new THREE.Vector3(); bb.getSize(sz); bb.getCenter(c);
   const k=1/Math.max(sz.x,sz.y,sz.z,0.05); inner.scale.setScalar(k); inner.position.set(-c.x*k,-c.y*k,-c.z*k);
   const wrap=new THREE.Group(); wrap.add(inner); wrap.userData.prod=prod; return wrap;
 }
-function openSwapper(obj){
-  const p=lastPlaced.find(q=>(q.uid||q.key)===obj.userData.uid&&!q.attached); if(!p||!p.prod) return;
+// the alternatives are drawn in their own little scene on top of the room, so walls never hide them
+const swScene=new THREE.Scene(), swSun=new THREE.DirectionalLight(0xffffff,1.5);
+swScene.add(new THREE.HemisphereLight(0xffffff,0xd9d3ca,0.85),swSun,swSun.target);
+const swShade=(()=>{ const c=document.createElement("canvas"); c.width=256; c.height=2; const x=c.getContext("2d"), gr=x.createLinearGradient(0,0,256,0);
+  gr.addColorStop(0,"rgba(38,46,52,0)"); gr.addColorStop(0.45,"rgba(38,46,52,0.2)"); gr.addColorStop(1,"rgba(38,46,52,0.34)"); x.fillStyle=gr; x.fillRect(0,0,256,2);
+  const t=new THREE.CanvasTexture(c); const m=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.MeshBasicMaterial({map:t,transparent:true,depthWrite:false,toneMapped:false}));
+  m.renderOrder=-1; swScene.add(m); return m; })(); // soft dark band behind the column so white models stand out
+function openSwapper(obj,tap){
+  let p;
+  if(tap){ const k=tap.userData.tapKey, pr=byId($("prod-"+k).value); if(!pr) return; p={key:k,uid:k,prod:pr,tapOnly:true}; obj=tap; } // the bath tap on its own
+  else p=lastPlaced.find(q=>(q.uid||q.key)===obj.userData.uid&&!q.attached); if(!p||!p.prod) return;
   const selEl=$("prod-"+p.key), list=(selEl&&selEl.tagName==="SELECT")?[...selEl.options].map(o=>byId(o.value)).filter(Boolean):PRODUCTS.filter(x=>x.cat===p.key); if(list.length<2){ $("hint").textContent="There is only one model of this kind in the catalogue so far."; return; }
   const bb=new THREE.Box3().setFromObject(obj), c=new THREE.Vector3(); bb.getCenter(c);
   const toCam=camera.position.clone().sub(c); toCam.y=0; const dist=toCam.length(); toCam.normalize();
   const anchor=c.clone().add(toCam.clone().multiplyScalar(Math.min(0.7,dist*0.3))); const S=clamp(dist*0.15,0.3,1.0); anchor.y=Math.max(bb.max.y+S*0.55,0.6);
-  const group=new THREE.Group(); scene.add(group);
+  const group=new THREE.Group(); swScene.add(group); swScene.environment=scene.environment;
   const items=list.map(()=>null); // models are built only when they come near the front, so hundreds of choices stay fast
   const idx=Math.max(0,list.findIndex(x=>x.id===p.prod.id));
   swapper={S,place:p,uid:p.uid||p.key,key:p.key,list,items,group,anchor,idx,shown:idx,target:idx,cur:p.prod.id,drag:null,box:new THREE.BoxHelper(obj,0x0f7a8a)};
@@ -1636,15 +1679,20 @@ function swapLabel(){ const sw=swapper; if(!sw) return; const pr=sw.list[clamp(M
   sp.textContent=`${Math.round(sw.target)+1} of ${sw.list.length} · ${priceOf(pr).toLocaleString("sk-SK",{style:"currency",currency:"EUR"})}`; nm.append(b,sp);
   $("swapPrev").disabled=sw.target<=0; $("swapNext").disabled=sw.target>=sw.list.length-1; }
 function updateSwapper(dt){
-  const sw=swapper; sw.shown+=(sw.target-sw.shown)*Math.min(1,dt*12);
-  const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion); right.y=0; right.normalize();
-  // a flat turntable: the chosen model sits in front, the others turn away to the back on either side
-  const S=sw.S, R=S*1.5, step=0.72, fwd=camera.position.clone().sub(sw.anchor); fwd.y=0; fwd.normalize();
-  sw.items.forEach((w,i)=>{ const th=(i-sw.shown)*step, on=Math.abs(th)<2.3; if(!on){ if(w) w.visible=false; return; }
+  const sw=swapper; sw.shown+=(sw.target-sw.shown)*Math.min(1,dt*12); sw.t=(sw.t||0)+dt;
+  // a column on the right of the screen, top to bottom along a gentle arc; the chosen model is in the middle and biggest
+  camera.updateMatrixWorld();
+  const Dz=1.5, halfH=Dz*Math.tan(THREE.MathUtils.degToRad(camera.fov/2)), halfW=halfH*camera.aspect;
+  const S0=Math.min(halfH*0.36,halfW*0.4), R=halfH*1.7, step=0.19, xc=halfW-S0*0.72-halfH*0.06;
+  const v=new THREE.Vector3();
+  sw.items.forEach((w,i)=>{ const d=i-sw.shown, th=d*step; if(Math.abs(th)>0.95){ if(w) w.visible=false; return; }
     if(!w){ w=sw.items[i]=previewOf(sw.list[i],sw.place); sw.group.add(w); } w.visible=true;
-    w.position.copy(sw.anchor).addScaledVector(right,Math.sin(th)*R).addScaledVector(fwd,(Math.cos(th)-1)*R);
-    const focus=Math.max(0,1-Math.abs(i-sw.shown)); w.scale.setScalar(S*(0.62+0.45*focus));
-    const look=camera.position.clone(); look.y=w.position.y; w.lookAt(look); });
+    v.set(xc+R*(1-Math.cos(th)),-R*Math.sin(th),-Dz); w.position.copy(camera.localToWorld(v));
+    const focus=Math.exp(-d*d*0.9); w.scale.setScalar(S0*(0.42+0.58*focus));
+    w.quaternion.copy(camera.quaternion); w.rotateX(0.28); w.rotateY(-0.55+focus*0.25*Math.sin(sw.t*1.2)); });
+  { const D2=Dz+S0, h2=D2*Math.tan(THREE.MathUtils.degToRad(camera.fov/2)), w2=h2*camera.aspect, bw=Math.min(w2*0.75,h2*1.1);
+    v.set(w2-bw/2,0,-D2); swShade.position.copy(camera.localToWorld(v)); swShade.quaternion.copy(camera.quaternion); swShade.scale.set(bw,h2*2.02,1); }
+  v.set(xc-1,2,1.5-Dz); swSun.position.copy(camera.localToWorld(v)); v.set(xc,0,-Dz); swSun.target.position.copy(camera.localToWorld(v.clone()));
   if(sw.box) sw.box.update();
 }
 function swapTo(i){ const sw=swapper; if(!sw) return; sw.target=clamp(Math.round(i),0,sw.list.length-1); swapLabel(); applySwap(); }
@@ -1656,9 +1704,10 @@ function applySwap(){
     if(MANUAL[sw.uid]){ const newUid=sw.uid.replace(sw.cur,pr.id); if(newUid!==sw.uid){ MANUAL[newUid]=MANUAL[sw.uid]; delete MANUAL[sw.uid]; sw.uid=newUid; } } }
   else $("prod-"+sw.key).value=pr.id;
   sw.cur=pr.id; rebuild();
-  const f=fixtures.find(o=>o.userData.key===sw.key&&(o.userData.uid===sw.uid||!it||!it.multi)) ; scene.remove(sw.box); sw.box=f?new THREE.BoxHelper(f,0x0f7a8a):null; if(sw.box) scene.add(sw.box);
+  let f=fixtures.find(o=>o.userData.key===sw.key&&(o.userData.uid===sw.uid||!it||!it.multi));
+  if(sw.place.tapOnly){ f=null; fixtures.forEach(o=>o.traverse(c=>{ if(!f&&c.userData.tapKey===sw.key) f=c; })); } scene.remove(sw.box); sw.box=f?new THREE.BoxHelper(f,0x0f7a8a):null; if(sw.box) scene.add(sw.box);
 }
-function closeSwapper(){ const sw=swapper; if(!sw) return; swapper=null; scene.remove(sw.group); disposeGroup(sw.group); if(sw.box) scene.remove(sw.box);
+function closeSwapper(){ const sw=swapper; if(!sw) return; swapper=null; swScene.remove(sw.group); disposeGroup(sw.group); if(sw.box) scene.remove(sw.box);
   $("swapbar").hidden=true; $("hint").hidden=false; $("hint").textContent=hints[view]; orbit.enabled=view!=="walk"; }
 $("swapPrev").addEventListener("click",()=>swapTo(swapper.target-1));
 $("swapNext").addEventListener("click",()=>swapTo(swapper.target+1));
@@ -1667,10 +1716,10 @@ $("swapDone").addEventListener("click",closeSwapper);
 let wheelT=0;
 renderer.domElement.addEventListener("wheel",e=>{ const sw=swapper; if(!sw) return; e.preventDefault(); e.stopImmediatePropagation();
   sw.target=clamp(sw.target+(e.deltaY+e.deltaX)/120,0,sw.list.length-1); swapLabel(); clearTimeout(wheelT); wheelT=setTimeout(()=>swapper&&swapTo(swapper.target),350); },{passive:false,capture:true});
-window.addEventListener("keydown",e=>{ if(!swapper) return; if(e.key==="ArrowLeft"){ swapTo(swapper.target-1); e.preventDefault(); e.stopImmediatePropagation(); } else if(e.key==="ArrowRight"){ swapTo(swapper.target+1); e.preventDefault(); e.stopImmediatePropagation(); } else if(e.key==="Escape"||e.key==="Enter") closeSwapper(); },true);
+window.addEventListener("keydown",e=>{ if(!swapper) return; if(e.key==="ArrowLeft"||e.key==="ArrowUp"){ swapTo(swapper.target-1); e.preventDefault(); e.stopImmediatePropagation(); } else if(e.key==="ArrowRight"||e.key==="ArrowDown"){ swapTo(swapper.target+1); e.preventDefault(); e.stopImmediatePropagation(); } else if(e.key==="Escape"||e.key==="Enter") closeSwapper(); },true);
 renderer.domElement.addEventListener("pointerdown",e=>{ if(!swapper) return; swapper.drag={x:e.clientX,y:e.clientY,start:swapper.target,moved:false}; renderer.domElement.setPointerCapture(e.pointerId); });
-renderer.domElement.addEventListener("pointermove",e=>{ const sw=swapper; if(!sw||!sw.drag) return; const dx=e.clientX-sw.drag.x; if(Math.abs(dx)>6) sw.drag.moved=true;
-  if(sw.drag.moved){ const fast=Math.abs(dx)>200?1.8:1; sw.target=clamp(sw.drag.start-dx*fast/48,0,sw.list.length-1); swapLabel(); } });
+renderer.domElement.addEventListener("pointermove",e=>{ const sw=swapper; if(!sw||!sw.drag) return; const dx=e.clientX-sw.drag.x, dy=e.clientY-sw.drag.y, m=Math.abs(dy)>=Math.abs(dx)?dy:dx; if(Math.abs(m)>6) sw.drag.moved=true;
+  if(sw.drag.moved){ const fast=Math.abs(m)>200?1.8:1; sw.target=clamp(sw.drag.start-m*fast/40,0,sw.list.length-1); swapLabel(); } });
 renderer.domElement.addEventListener("pointerup",e=>{ const sw=swapper; if(!sw||!sw.drag) return; const d=sw.drag; sw.drag=null;
   if(d.moved){ swapTo(sw.target); return; }
   aimRay(e); const hits=ray.intersectObjects(sw.items.filter(w=>w&&w.visible),true);
